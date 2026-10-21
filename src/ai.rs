@@ -22,6 +22,7 @@
 //! совпадают с обычными ключами словаря.
 //!
 //! Формат записи журнала: тип, табуляция, текст.
+//!   # — метка сеанса, всегда первая строка файла;
 //!   S — строка с экрана как есть;
 //!   R — абзац: его строки через 0x1F, в точности как на экране.
 
@@ -52,11 +53,12 @@ const LINE_SEPARATOR: u8 = 0x1f;
 /// а цепочка несвязанных надписей, оканчивающихся пробелом.
 const RUN_MAX_LINES: usize = 40;
 const RUN_MAX_BYTES: usize = 4000;
-/// Меньше двух строк — не абзац. Короткая цепочка вроде
-/// «Hotkey: » + «m» — подпись и значение, а не текст.
+/// Меньше двух строк — не абзац. Пределы подобраны так, чтобы
+/// короткие подсказки вроде «Finish placing » + «structures.» были
+/// абзацем, а «Hotkey: » + «m» — нет.
 const PARAGRAPH_MIN_LINES: usize = 2;
-const PARAGRAPH_MIN_LEN: usize = 30;
-const PARAGRAPH_MIN_SPACES: usize = 4;
+const PARAGRAPH_MIN_LEN: usize = 16;
+const PARAGRAPH_MIN_SPACES: usize = 2;
 
 static AI_DICTIONARY: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -216,12 +218,26 @@ fn finish_lines(lines: &[Vec<u8>], missed: &[bool]) {
   }
 }
 
+/// Подпись и значение: «World: » + название мира, «Hotkey: » + «m».
+/// Две строки, первая заканчивается двоеточием — это не текст.
+fn is_label_pair(lines: &[Vec<u8>]) -> bool {
+  if lines.len() != 2 {
+    return false;
+  }
+  let first = &lines[0];
+  let end = first.iter().rposition(|&b| b != b' ');
+  matches!(end.map(|i| first[i]), Some(b':'))
+}
+
 /// Завершение абзаца: если это настоящий абзац и в нём есть строки
 /// без перевода — в журнал уходит весь абзац с разбивкой по строкам.
 fn finish_run(lines: Vec<Vec<u8>>, missed: Vec<bool>) {
   let total: usize = lines.iter().map(|l| l.len()).sum();
   let spaces: usize = lines.iter().map(|l| l.iter().filter(|&&b| b == b' ').count()).sum();
-  let is_paragraph = lines.len() >= PARAGRAPH_MIN_LINES && total >= PARAGRAPH_MIN_LEN && spaces >= PARAGRAPH_MIN_SPACES;
+  let is_paragraph = lines.len() >= PARAGRAPH_MIN_LINES
+    && total >= PARAGRAPH_MIN_LEN
+    && spaces >= PARAGRAPH_MIN_SPACES
+    && !is_label_pair(&lines);
 
   if !is_paragraph {
     finish_lines(&lines, &missed);
@@ -333,6 +349,16 @@ fn start_miss_writer() {
 
   std::thread::spawn(move || {
     let mut writer = BufWriter::new(file);
+
+    // Метка сеанса в первой строке: по ней приложение отличает новый
+    // журнал от старого, даже если новый успел вырасти больше старого
+    let stamp = SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_nanos())
+      .unwrap_or(0);
+    let _ = writer.write_all(format!("#\t{stamp}\n").as_bytes());
+    let _ = writer.flush();
+
     loop {
       match rx.recv_timeout(Duration::from_millis(500)) {
         Ok(line) => {
