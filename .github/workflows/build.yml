@@ -52,7 +52,7 @@ jobs:
 
       - name: Upload artifact (win)
         uses: actions/upload-artifact@v7
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         with:
           name: dfint_hook.dll
           path: ./target/release/dfint_hook.dll
