@@ -103,7 +103,7 @@ pub unsafe fn disable_all() -> Result<()> {
 fn string_copy_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match dictionary::lookup_source(value) {
+      (value, true) => match dictionary::lookup(value) {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
           original!(dst, ptr, len - 1)
@@ -120,7 +120,7 @@ fn string_copy_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
 fn string_append_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match dictionary::lookup_source(value) {
+      (value, true) => match dictionary::lookup(value) {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
           original!(dst, ptr, len - 1)
@@ -137,7 +137,7 @@ fn string_append_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char
 fn std_string_ctor(dst: *const u8, src: *const u8, size: usize) -> *const u8 {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match dictionary::lookup_source(value) {
+      (value, true) => match dictionary::lookup(value) {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
           original!(dst, ptr, len - 1)
@@ -154,7 +154,7 @@ fn std_string_ctor(dst: *const u8, src: *const u8, size: usize) -> *const u8 {
 fn std_string_append(dst: *const u8, src: *const u8) -> *const u8 {
   unsafe {
     match std::ffi::CStr::from_ptr(src as *const c_char).to_bytes() {
-      (value) => match dictionary::lookup_source(value) {
+      (value) => match dictionary::lookup(value) {
         Some(translate) => {
           let (ptr, _, _) = translate.to_owned().into_raw_parts();
           original!(dst, ptr)
@@ -171,7 +171,7 @@ fn std_string_append(dst: *const u8, src: *const u8) -> *const u8 {
 fn std_string_assign(dst: *const u8, src: *const u8) -> *const u8 {
   unsafe {
     match std::ffi::CStr::from_ptr(src as *const c_char).to_bytes() {
-      (value) => match dictionary::lookup_source(value) {
+      (value) => match dictionary::lookup(value) {
         Some(translate) => {
           let (ptr, _, _) = translate.to_owned().into_raw_parts();
           original!(dst, ptr)
