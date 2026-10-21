@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::io::prelude::*;
 
+use crate::ai;
 use crate::constants::PATH_DICTIONARY;
 use crate::utils;
 
@@ -50,8 +51,10 @@ impl Dictionary {
     Ok(())
   }
 
+  /// Разбор CSV-словаря. Открыт для модуля ai: второй словарь
+  /// читается тем же разбором, чтобы формат файлов был одинаковым.
   #[allow(unused_must_use)]
-  fn load(path: &str) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+  pub fn load(path: &str) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
     let mut file = std::fs::File::open(path)?;
     let mut contents: Vec<u8> = Vec::new();
     file.read_to_end(&mut contents);
@@ -66,5 +69,26 @@ impl Dictionary {
       map.insert(k, v);
     }
     Ok(map)
+  }
+}
+
+/// Поиск перевода: сначала основной словарь сообщества,
+/// затем нейросетевой. Ручной перевод всегда в приоритете.
+pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
+  if let Some(value) = DICTIONARY.get(key) {
+    return Some(value.clone());
+  }
+  ai::lookup(key)
+}
+
+/// То же, что lookup, но для строк, выводимых на экран.
+/// Строка без перевода уходит в журнал промахов для переводчика.
+pub fn lookup_screen(key: &[u8]) -> Option<Vec<u8>> {
+  match lookup(key) {
+    Some(value) => Some(value),
+    None => {
+      ai::report_miss(key);
+      None
+    }
   }
 }

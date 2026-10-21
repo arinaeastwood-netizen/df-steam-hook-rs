@@ -4,6 +4,7 @@
 extern crate serde_derive;
 extern crate toml;
 
+mod ai;
 mod config;
 mod constants;
 mod cxxstring;
@@ -56,6 +57,8 @@ extern "C" fn attach() {
     if CONFIG.settings.watchdog {
       watchdog::install();
     }
+    // Нейроперевод: журнал промахов и второй словарь с горячей перезагрузкой
+    ai::start();
   }
 }
 

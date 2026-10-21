@@ -11,3 +11,9 @@ pub const PATH_ENCODING: &'static str = "./dfint-data/encoding.toml";
 pub const PATH_CONFIG: &'static str = "./dfint-data/config.toml";
 pub const PATH_OFFSETS: &'static str = "./dfint-data/offsets.toml";
 pub const PATH_DICTIONARY: &'static str = "./dfint-data/dictionary.csv";
+
+// Нейроперевод: второй словарь и журнал непереведённых строк.
+// Обменом с ними занимается внешнее приложение-переводчик.
+pub const PATH_AI_DIR: &'static str = "./dfint-data/ai";
+pub const PATH_AI_DICTIONARY: &'static str = "./dfint-data/ai/dictionary_ai.csv";
+pub const PATH_AI_MISSES: &'static str = "./dfint-data/ai/misses.txt";
