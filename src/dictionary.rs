@@ -81,6 +81,19 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
   ai::lookup(key)
 }
 
+/// То же, что lookup, но для строк, которые игра только создаёт
+/// (копирует, склеивает). Длинная строка без перевода запоминается:
+/// если потом на экран попадёт её кусок, в журнал уйдёт она целиком.
+pub fn lookup_source(key: &[u8]) -> Option<Vec<u8>> {
+  match lookup(key) {
+    Some(value) => Some(value),
+    None => {
+      ai::remember_source(key);
+      None
+    }
+  }
+}
+
 /// То же, что lookup, но для строк, выводимых на экран.
 /// Строка без перевода уходит в журнал промахов для переводчика.
 pub fn lookup_screen(key: &[u8]) -> Option<Vec<u8>> {

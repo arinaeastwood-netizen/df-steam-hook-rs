@@ -6,6 +6,18 @@
 //!   2) раз в секунду проверяет dfint-data/ai/dictionary_ai.csv и,
 //!      если файл изменился, перечитывает его без перезапуска игры.
 //!
+//! Абзацы. Длинный текст игра сначала создаёт целиком, а потом режет
+//! на строки по ширине окна и выводит по одной. Переводить такие куски
+//! по отдельности бессмысленно. Поэтому хук держит кольцевой буфер
+//! последних длинных строк, которые игра создавала без перевода, и
+//! когда на экран попадает кусок одной из них — записывает в журнал
+//! исходный абзац целиком. Перевод абзаца подставляется ещё до
+//! разрезания, и игра сама переносит русский текст по ширине окна.
+//!
+//! Формат строки журнала: тип, табуляция, текст.
+//!   S — строка с экрана как есть;
+//!   P — исходный абзац, из которого взята строка с экрана.
+//!
 //! Всё остальное (пачки, запросы к API, кэш) делает внешнее приложение.
 //! Так сбой сети или переводчика никогда не роняет игру.
 //!
@@ -13,7 +25,7 @@
 //! try_lock / try_send, и при занятости строка просто пропускается —
 //! она придёт снова на следующем кадре.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,12 +46,24 @@ const MAX_SEEN: usize = 500_000;
 const QUEUE_CAPACITY: usize = 20_000;
 /// Период проверки словаря на изменения.
 const RELOAD_PERIOD: Duration = Duration::from_millis(1000);
+/// Строка короче этого не считается абзацем.
+const SOURCE_MIN_LEN: usize = 40;
+/// В абзаце должно быть хотя бы столько пробелов.
+const SOURCE_MIN_SPACES: usize = 5;
+/// Сколько последних длинных строк помнит буфер.
+const SOURCE_RING: usize = 512;
+/// Кусок короче этого не ищется в абзацах: слишком велик риск
+/// найти его в чужом тексте.
+const PIECE_MIN_LEN: usize = 4;
 
 static AI_DICTIONARY: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Число записей во втором словаре. Пока он пуст, поиск в нём
 /// пропускается целиком, без взятия блокировки.
 static AI_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+/// Последние длинные строки, которые игра создала без перевода.
+static SOURCES: LazyLock<Mutex<VecDeque<Vec<u8>>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(SOURCE_RING)));
 
 struct MissState {
   seen: HashSet<Vec<u8>>,
@@ -77,9 +101,80 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
   }
 }
 
+/// Запоминание длинной строки, созданной игрой без перевода.
+/// Вызывается на каждый промах низкоуровневых хуков, поэтому отсев
+/// идёт до любых блокировок и копирований.
+pub fn remember_source(src: &[u8]) {
+  if src.len() < SOURCE_MIN_LEN || src.len() > MAX_LEN {
+    return;
+  }
+  if src.iter().filter(|&&b| b == b' ').count() < SOURCE_MIN_SPACES {
+    return;
+  }
+
+  let mut ring = match SOURCES.try_lock() {
+    Ok(ring) => ring,
+    Err(_) => return,
+  };
+
+  // Один и тот же текст часто создаётся несколько раз подряд
+  if ring.iter().rev().take(8).any(|known| known.as_slice() == src) {
+    return;
+  }
+
+  if ring.len() >= SOURCE_RING {
+    ring.pop_front();
+  }
+  ring.push_back(src.to_vec());
+}
+
+fn trim_spaces(s: &[u8]) -> &[u8] {
+  let start = s.iter().position(|&b| b != b' ').unwrap_or(s.len());
+  let end = s.iter().rposition(|&b| b != b' ').map(|i| i + 1).unwrap_or(start);
+  &s[start..end]
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+  needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Похожа ли строка с экрана на кусок абзаца. Одиночное слово без
+/// знака препинания («Space», «Hotkey») слишком легко найти в чужом
+/// тексте, поэтому ищутся только куски с пробелом или концом фразы.
+fn looks_like_piece(piece: &[u8]) -> bool {
+  if piece.len() < PIECE_MIN_LEN {
+    return false;
+  }
+  let has_space = piece.contains(&b' ');
+  let ends_phrase = matches!(piece.last().copied(), Some(b'.' | b',' | b';' | b':' | b'!' | b'?'));
+  has_space || ends_phrase
+}
+
+/// Поиск абзаца, из которого взята строка с экрана.
+fn find_source(line: &[u8]) -> Option<Vec<u8>> {
+  let piece = trim_spaces(line);
+  if !looks_like_piece(piece) {
+    return None;
+  }
+
+  let ring = SOURCES.try_lock().ok()?;
+  let found = ring
+    .iter()
+    .rev()
+    .find(|src| src.len() > piece.len() + 1 && contains(src, piece))
+    .cloned();
+  found
+}
+
+/// Обрезанная интерфейсом строка («Убийством из S...») — её переводить
+/// бессмысленно, полный текст придёт в другом месте.
+fn is_truncated(key: &[u8]) -> bool {
+  key.ends_with(b"...")
+}
+
 /// Регистрация строки без перевода.
 pub fn report_miss(key: &[u8]) {
-  if !worth_logging(key) {
+  if !worth_logging(key) || is_truncated(key) {
     return;
   }
 
@@ -92,16 +187,34 @@ pub fn report_miss(key: &[u8]) {
     return;
   }
 
-  let line = key.to_vec();
+  let (kind, payload) = match find_source(key) {
+    Some(source) => (b'P', source),
+    None => (b'S', key.to_vec()),
+  };
+
+  // Абзац уже записан по другой его строке — эту просто отмечаем
+  if kind == b'P' && state.seen.contains(payload.as_slice()) {
+    state.seen.insert(key.to_vec());
+    return;
+  }
+
+  let mut line = Vec::with_capacity(payload.len() + 2);
+  line.push(kind);
+  line.push(b'\t');
+  line.extend_from_slice(&payload);
+
   let sent = match state.tx.as_ref() {
-    Some(tx) => tx.try_send(line.clone()).is_ok(),
+    Some(tx) => tx.try_send(line).is_ok(),
     None => false,
   };
 
   // В «увиденные» строка попадает только после успешной отправки:
   // если очередь была переполнена, она уйдёт в следующий раз
   if sent {
-    state.seen.insert(line);
+    state.seen.insert(key.to_vec());
+    if kind == b'P' {
+      state.seen.insert(payload);
+    }
   }
 }
 
