@@ -59,6 +59,8 @@ const RUN_MAX_BYTES: usize = 4000;
 const PARAGRAPH_MIN_LINES: usize = 2;
 const PARAGRAPH_MIN_LEN: usize = 16;
 const PARAGRAPH_MIN_SPACES: usize = 2;
+/// Русская фраза длиннее этого — уже не склейка игры, а текст.
+const RUSSIAN_MAX_LEN: usize = 200;
 
 static AI_DICTIONARY: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -239,6 +241,14 @@ fn finish_run(lines: Vec<Vec<u8>>, missed: Vec<bool>) {
     && spaces >= PARAGRAPH_MIN_SPACES
     && !is_label_pair(&lines);
 
+  // Абзац целиком на русском — это подсказка, которую уже перевёл
+  // словарь dfint и игра разрезала на строки. Он правильный, и его
+  // строки по одной тоже записывать не нужно
+  let has_latin = lines.iter().any(|l| l.iter().any(|b| b.is_ascii_alphabetic()));
+  if lines.len() >= PARAGRAPH_MIN_LINES && !has_latin {
+    return;
+  }
+
   if !is_paragraph {
     finish_lines(&lines, &missed);
     return;
@@ -299,14 +309,49 @@ pub fn report_miss(key: &[u8]) {
   send_entry(b'S', key.to_vec());
 }
 
-/// Отсев того, что переводить бессмысленно: короткие обрывки,
-/// числа, знаки, строки без латинских букв.
+/// Отсев того, что переводить бессмысленно.
+///
+/// Строка с латиницей записывается, если в ней хотя бы две латинские
+/// буквы: короткие обрывки и числа не нужны.
+///
+/// Строка с русскими буквами (байты от 0x80 в кодировке игры) — это
+/// текст, который уже перевёл словарь dfint. Он записывается в двух
+/// случаях, когда перевод сломан:
+///   — на конце одна английская буква: игра приписала «s» множественного
+///     числа к переведённому слову («Браслетs»);
+///   — несколько слов без цифр: игра склеила фразу из отдельно
+///     переведённых слов, и род с падежом могут не совпадать
+///     («Густой куропаточья трава»).
+/// Строки с цифрами пропускаются: счётчики и даты меняются постоянно.
 fn worth_logging(key: &[u8]) -> bool {
   if key.len() < MIN_LEN || key.len() > MAX_LEN {
     return false;
   }
+
   let letters = key.iter().filter(|b| b.is_ascii_alphabetic()).count();
-  letters >= 2
+  let high = key.iter().filter(|&&b| b >= 0x80).count();
+
+  if high == 0 {
+    return letters >= 2;
+  }
+  if letters >= 2 {
+    return true;
+  }
+  if key.iter().any(|b| b.is_ascii_digit()) || high < 2 {
+    return false;
+  }
+
+  let n = key.len();
+  let plural_suffix = n >= 2 && key[n - 1].is_ascii_alphabetic() && key[n - 2] >= 0x80;
+  let several_words = letters == 0 && key.len() <= RUSSIAN_MAX_LEN && trim_spaces(key).contains(&b' ');
+
+  plural_suffix || several_words
+}
+
+fn trim_spaces(s: &[u8]) -> &[u8] {
+  let start = s.iter().position(|&b| b != b' ').unwrap_or(s.len());
+  let end = s.iter().rposition(|&b| b != b' ').map(|i| i + 1).unwrap_or(start);
+  &s[start..end]
 }
 
 /// Экранирование для построчного файла: перевод строки внутри
