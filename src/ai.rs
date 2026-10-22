@@ -230,9 +230,26 @@ pub fn start() {
   );
 }
 
-/// Поиск во втором словаре.
+/// Имя слова из словаря языков игры: одно слово из строчных латинских
+/// букв, возможно с дефисами («dwarf», «maelstrom», «mountain-home»).
+/// Игра ищет слова по такому имени побайтово; подмена имени переводом
+/// рушит поиск, и загрузка мира падает с «Missing Word Definition».
+/// Поэтому нейросетевой перевод к таким строкам не применяется.
+/// Словарь сообщества dfint их переводит безопасно — его составляли
+/// люди с учётом этого.
+pub fn is_word_key(key: &[u8]) -> bool {
+  let n = key.len();
+  if n < 2 || n > 40 {
+    return false;
+  }
+  key.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
+    && key[0].is_ascii_lowercase()
+    && key[n - 1].is_ascii_lowercase()
+}
+
+/// Поиск во втором (нейросетевом) словаре. Имена слов пропускаются.
 pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
-  if AI_SIZE.load(Ordering::Relaxed) == 0 {
+  if AI_SIZE.load(Ordering::Relaxed) == 0 || is_word_key(key) {
     return None;
   }
   let map = AI_DICTIONARY.try_read().ok()?;
@@ -431,9 +448,10 @@ fn send_entry(kind: u8, payload: Vec<u8>) -> bool {
   sent
 }
 
-/// Регистрация строки без перевода.
+/// Регистрация строки без перевода. Имена слов не записываются:
+/// их нельзя переводить нейросетью (см. is_word_key).
 pub fn report_miss(key: &[u8]) {
-  if !worth_logging(key) {
+  if !worth_logging(key) || is_word_key(key) {
     return;
   }
   send_entry(b'S', key.to_vec());
