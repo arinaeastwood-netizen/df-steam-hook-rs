@@ -18,3 +18,7 @@ pub const PATH_AI_DIR: &'static str = "./dfint-data/ai";
 pub const PATH_AI_DICTIONARY: &'static str = "./dfint-data/ai/dictionary_ai.csv";
 pub const PATH_AI_MISSES: &'static str = "./dfint-data/ai/misses.txt";
 pub const PATH_AI_EXPERIMENTS: &'static str = "./dfint-data/ai/experiments.txt";
+/// Базовый словарь: переводы, которые хук до версии 13 подставлял и при
+/// копировании строк. Они могли попасть в сохранения, поэтому заморожены
+/// и применяются там же, где раньше, — иначе старые сохранения не загрузятся
+pub const PATH_AI_CORE: &'static str = "./dfint-data/ai/dictionary_ai_core.csv";

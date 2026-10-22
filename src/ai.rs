@@ -46,7 +46,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
-use crate::constants::{PATH_AI_DICTIONARY, PATH_AI_DIR, PATH_AI_EXPERIMENTS, PATH_AI_MISSES};
+use crate::constants::{PATH_AI_CORE, PATH_AI_DICTIONARY, PATH_AI_DIR, PATH_AI_EXPERIMENTS, PATH_AI_MISSES};
 use crate::dictionary::Dictionary;
 
 /// Минимальная длина строки, которую имеет смысл переводить.
@@ -83,6 +83,56 @@ struct AiEntry {
 }
 
 static AI_DICTIONARY: LazyLock<RwLock<HashMap<Vec<u8>, AiEntry>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Базовый словарь (dictionary_ai_core.csv). До версии 13 хук применял
+/// нейросетевой перевод и при копировании строк, и переведённые имена
+/// попадали в сохранения. Эти значения заморожены: хук применяет их
+/// везде, как раньше, — тогда игра одинаково видит и сохранённые имена,
+/// и свои собственные, и сохранение загружается.
+static AI_CORE: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+static CORE_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+/// Поиск в базовом словаре. Блокировка берётся с ожиданием, а не через
+/// try_lock: здесь пропуск перевода означал бы несовпадение имён, а
+/// запись в базовый словарь бывает лишь при его перезагрузке.
+pub fn lookup_core(key: &[u8]) -> Option<Vec<u8>> {
+  if CORE_SIZE.load(Ordering::Relaxed) == 0 {
+    return None;
+  }
+  match AI_CORE.read() {
+    Ok(map) => map.get(key).cloned(),
+    Err(_) => None,
+  }
+}
+
+fn load_core() -> Option<SystemTime> {
+  let stamp = modified_at(PATH_AI_CORE);
+  match Dictionary::load(PATH_AI_CORE) {
+    Ok(map) => {
+      let size = map.len();
+      if let Ok(mut guard) = AI_CORE.write() {
+        *guard = map;
+        CORE_SIZE.store(size, Ordering::Relaxed);
+        log::info!("ai: core dictionary loaded, items {size}");
+      }
+      stamp
+    }
+    Err(err) => {
+      // Файл исчез — словаря больше нет. Файл есть, но не прочитался
+      // (занят записью) — прежние значения остаются: пропажа базового
+      // перевода посреди игры означала бы несовпадение имён
+      if fs::metadata(PATH_AI_CORE).is_err() {
+        if let Ok(mut guard) = AI_CORE.write() {
+          guard.clear();
+          CORE_SIZE.store(0, Ordering::Relaxed);
+        }
+      } else {
+        log::warn!("ai: unable to load core dictionary: {err}");
+      }
+      None
+    }
+  }
+}
 
 /// Число записей во втором словаре. Пока он пуст, поиск в нём
 /// пропускается целиком, без взятия блокировки.
@@ -155,6 +205,7 @@ const GPS_SCREENF: usize = 0x8c;
 const GPS_SCREENBRIGHT: usize = 0x8e;
 
 /// Связки, которыми игра соединяет части описания характера.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const CONNECTORS: [&[u8]; 4] = [b", and ", b", though ", b", although ", b", even though "];
 
 /// Можно ли переводить кусок, который игра склеивает со строкой.
@@ -165,6 +216,7 @@ const CONNECTORS: [&[u8]; 4] = [b", and ", b", though ", b", although ", b", eve
 /// «Missing Word Definition». Поэтому переводятся только фразы: не
 /// меньше двух пробелов внутри, только печатные латинские символы, —
 /// и несколько связок описания характера.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn concat_fragment_allowed(key: &[u8]) -> bool {
   if CONNECTORS.contains(&key) {
     return true;
@@ -218,8 +270,12 @@ pub fn start() {
     return;
   }
 
+  // Базовый словарь загружается сразу, до чтения данных игры: если
+  // загрузить его позже, часть имён успеет пройти без перевода
+  let core_stamp = load_core();
+
   start_miss_writer();
-  start_reloader();
+  start_reloader(core_stamp);
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
@@ -592,10 +648,18 @@ fn modified_at(path: &str) -> Option<SystemTime> {
   fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
-fn start_reloader() {
+fn start_reloader(core_stamp: Option<SystemTime>) {
   std::thread::spawn(move || {
     let mut last: Option<SystemTime> = None;
+    let mut last_core = core_stamp;
     loop {
+      // Базовый словарь меняется редко — только когда приложение
+      // замораживает в нём новые значения
+      let core_now = modified_at(PATH_AI_CORE);
+      if core_now != last_core {
+        last_core = load_core();
+      }
+
       let current = modified_at(PATH_AI_DICTIONARY);
 
       if current != last {
