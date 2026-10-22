@@ -20,18 +20,59 @@ static ENABLER: usize = unsafe {
   }
 };
 
-/// Установлен ли перехват addst_flag. Если нет, включать и выключать
-/// его нельзя: неустановленный перехват вернёт ошибку и сорвёт
-/// включение остальных.
-static ADDST_FLAG_ATTACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Установлены ли необязательные перехваты. Неустановленный перехват
+/// нельзя включать и выключать: он вернёт ошибку и сорвёт включение
+/// остальных (горячая клавиша Ctrl+F2).
+static ADDST_FLAG_ATTACHED: AtomicBool = AtomicBool::new(false);
+static CSTR_PLUS_ATTACHED: AtomicBool = AtomicBool::new(false);
+static ADDCOLOREDST_ATTACHED: AtomicBool = AtomicBool::new(false);
+
+/// addst_flag рисует вкладки и кнопки. dfint на Windows его отключил
+/// (март 2024, без пояснения); проверка на 52.05 показала, что он
+/// работает. Аварийный выключатель — строка addst_flag_off в
+/// dfint-data/ai/experiments.txt.
 fn addst_flag_wanted() -> bool {
   if cfg!(target_os = "linux") {
     return true;
   }
-  // Без адреса функции в offsets.toml перехват ставить нельзя
   let has_offset = CONFIG.offset.as_ref().map_or(false, |o| o.addst_flag.is_some());
-  crate::ai::EXPERIMENTS.addst_flag && has_offset
+  has_offset && !crate::ai::EXPERIMENTS.addst_flag_off
+}
+
+// ==================== ПЕРЕХВАТЫ СВЕРХ DFINT ====================
+//
+// Адреса найдены разбором Dwarf Fortress.exe 52.05 (steam, win64), в
+// списках dfint их нет. Перехват ставится только на этой версии и только
+// если первые 16 байт функции совпадают с увиденными при разборе — на
+// любой другой сборке он просто не встанет.
+
+const EXTRA_CHECKSUM: u32 = 0x68D6_4CE7;
+
+/// std::string operator+(const char*, const std::string&): склейка
+/// строки-константы с текстом. Так собираются, например, черты характера
+/// («is not a private person and freely shares details of » + имя);
+/// перевод в словаре dfint есть, но до этой функции он не доходил.
+const CSTR_PLUS_STRING: usize = 0x148d10;
+const CSTR_PLUS_STRING_PROLOGUE: [u8; 16] = [
+  0x40, 0x53, 0x55, 0x56, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x30, 0x48, 0x8b, 0xf2, 0x4d,
+];
+
+/// graphicst::addcoloredst(const char* text, const char* colors): вывод
+/// строки с отдельным цветом каждой буквы. Пока только замер — проверяем,
+/// не ею ли выводятся мысли и характер дварфа.
+const ADDCOLOREDST: usize = 0xa99320;
+const ADDCOLOREDST_PROLOGUE: [u8; 16] = [
+  0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57,
+];
+
+fn extra_ok(offset: usize, prologue: &[u8; 16]) -> bool {
+  if cfg!(not(target_os = "windows")) || CONFIG.offset_metadata.checksum != EXTRA_CHECKSUM {
+    return false;
+  }
+  let bytes = unsafe { std::slice::from_raw_parts(utils::address(offset) as *const u8, 16) };
+  bytes == prologue
 }
 
 pub unsafe fn attach_all() -> Result<()> {
@@ -45,8 +86,18 @@ pub unsafe fn attach_all() -> Result<()> {
     attach_addst_top()?;
     if addst_flag_wanted() {
       attach_addst_flag()?;
-      ADDST_FLAG_ATTACHED.store(true, std::sync::atomic::Ordering::Relaxed);
+      ADDST_FLAG_ATTACHED.store(true, Ordering::Relaxed);
       log::info!("addst_flag hook attached");
+    }
+    if extra_ok(CSTR_PLUS_STRING, &CSTR_PLUS_STRING_PROLOGUE) {
+      attach_cstr_plus_string()?;
+      CSTR_PLUS_ATTACHED.store(true, Ordering::Relaxed);
+      log::info!("cstr_plus_string hook attached");
+    }
+    if crate::ai::EXPERIMENTS.screen_probe && extra_ok(ADDCOLOREDST, &ADDCOLOREDST_PROLOGUE) {
+      attach_addcoloredst()?;
+      ADDCOLOREDST_ATTACHED.store(true, Ordering::Relaxed);
+      log::info!("addcoloredst probe attached");
     }
   }
   if CONFIG.settings.enable_search && CONFIG.encoding.parsed {
@@ -68,8 +119,14 @@ pub unsafe fn enable_translation() -> Result<()> {
   enable_std_string_assign()?;
   enable_addst()?;
   enable_addst_top()?;
-  if ADDST_FLAG_ATTACHED.load(std::sync::atomic::Ordering::Relaxed) {
+  if ADDST_FLAG_ATTACHED.load(Ordering::Relaxed) {
     enable_addst_flag()?;
+  }
+  if CSTR_PLUS_ATTACHED.load(Ordering::Relaxed) {
+    enable_cstr_plus_string()?;
+  }
+  if ADDCOLOREDST_ATTACHED.load(Ordering::Relaxed) {
+    enable_addcoloredst()?;
   }
   Ok(())
 }
@@ -98,8 +155,14 @@ pub unsafe fn disable_translation() -> Result<()> {
   disable_std_string_assign()?;
   disable_addst()?;
   disable_addst_top()?;
-  if ADDST_FLAG_ATTACHED.load(std::sync::atomic::Ordering::Relaxed) {
+  if ADDST_FLAG_ATTACHED.load(Ordering::Relaxed) {
     disable_addst_flag()?;
+  }
+  if CSTR_PLUS_ATTACHED.load(Ordering::Relaxed) {
+    disable_cstr_plus_string()?;
+  }
+  if ADDCOLOREDST_ATTACHED.load(Ordering::Relaxed) {
+    disable_addcoloredst()?;
   }
   Ok(())
 }
@@ -262,7 +325,7 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
 }
 
 // На Windows dfint этот перехват отключил (март 2024, без пояснения).
-// Здесь он включается только экспериментом addst_flag — см. ai.rs
+// Здесь он включён — см. addst_flag_wanted
 #[cfg_attr(target_os = "windows", hook(by_offset))]
 #[cfg_attr(target_os = "linux", hook(by_symbol))]
 fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
@@ -288,6 +351,39 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
       },
       _ => original!(gps, src, a3, a4, flag),
     }
+  }
+}
+
+#[cfg_attr(target_os = "windows", hook(offset = "148d10"))]
+#[cfg_attr(target_os = "linux", hook(bypass))]
+fn cstr_plus_string(result: usize, lhs: *const c_char, rhs: usize) -> usize {
+  unsafe {
+    if lhs.is_null() {
+      return original!(result, lhs, rhs);
+    }
+    let bytes = std::ffi::CStr::from_ptr(lhs).to_bytes();
+    // Только словарь сообщества и без записи в журнал: среди склеек есть
+    // служебные строки (пути к файлам), которые переводить нельзя
+    match dictionary::lookup(bytes) {
+      Some(translate) => {
+        // Значение словаря уже заканчивается нулём — это готовая C-строка
+        let (ptr, _, _) = translate.into_raw_parts();
+        original!(result, ptr as *const c_char, rhs)
+      }
+      None => original!(result, lhs, rhs),
+    }
+  }
+}
+
+#[cfg_attr(target_os = "windows", hook(offset = "a99320"))]
+#[cfg_attr(target_os = "linux", hook(bypass))]
+fn addcoloredst(gps: usize, text: *const c_char, colors: *const u8) {
+  unsafe {
+    if !text.is_null() {
+      let bytes = std::ffi::CStr::from_ptr(text).to_bytes();
+      crate::ai::probe(b'C', gps, bytes);
+    }
+    original!(gps, text, colors)
   }
 }
 

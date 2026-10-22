@@ -120,12 +120,13 @@ static MISSES: LazyLock<Mutex<MissState>> = LazyLock::new(|| {
 
 /// Эксперименты включаются строками в dfint-data/ai/experiments.txt,
 /// файл пишет приложение. Читается один раз при запуске игры.
-///   addst_flag   — перехват функции вывода addst_flag, которую dfint
-///                  на Windows отключил; проверяем, рисует ли она вкладки;
-///   screen_probe — запись для каждой надписи первых чисел структуры
-///                  графики: по описанию DFHack там координаты курсора.
+///   addst_flag_off — выключить перехват addst_flag (он рисует вкладки
+///                    и кнопки и теперь включён всегда) — на случай вылетов;
+///   screen_probe   — запись для каждой надписи её позиции и цвета.
 pub struct Experiments {
-  pub addst_flag: bool,
+  /// Перехват addst_flag теперь включён всегда; эта строка в файле —
+  /// аварийный выключатель на случай вылетов
+  pub addst_flag_off: bool,
   pub screen_probe: bool,
 }
 
@@ -133,7 +134,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
   let text = fs::read_to_string(PATH_AI_EXPERIMENTS).unwrap_or_default();
   let has = |name: &str| text.lines().any(|l| l.trim() == name);
   Experiments {
-    addst_flag: has("addst_flag"),
+    addst_flag_off: has("addst_flag_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -143,22 +144,41 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
 const PROBE_LIMIT: usize = 30_000;
 static PROBED: AtomicUsize = AtomicUsize::new(0);
 
-/// Диагностика: функция вывода (A — addst, T — addst_top, F — addst_flag),
-/// первые четыре 32-битных числа структуры графики и текст. Одинаковый
-/// текст в том же месте экрана пишется один раз.
+/// Поля структуры графики игры, найденные разбором кода addst и вывода
+/// символа в версии 52.05: позиция курсора и текущий цвет.
+const GPS_SCREENX: usize = 0x84;
+const GPS_SCREENY: usize = 0x88;
+const GPS_SCREENF: usize = 0x8c;
+const GPS_SCREENBRIGHT: usize = 0x8e;
+
+/// Позиция, с которой будет нарисован следующий текст.
+pub fn cursor(gps: usize) -> (i32, i32) {
+  if gps == 0 {
+    return (0, 0);
+  }
+  unsafe {
+    (
+      std::ptr::read_unaligned((gps + GPS_SCREENX) as *const i32),
+      std::ptr::read_unaligned((gps + GPS_SCREENY) as *const i32),
+    )
+  }
+}
+
+/// Диагностика: функция вывода (A — addst, T — addst_top, F — addst_flag,
+/// C — addcoloredst), позиция на экране, цвет и текст. Одинаковый текст
+/// в том же месте экрана пишется один раз.
 pub fn probe(func: u8, gps: usize, key: &[u8]) {
   if !EXPERIMENTS.screen_probe || gps == 0 || PROBED.load(Ordering::Relaxed) >= PROBE_LIMIT {
     return;
   }
-  let fields = unsafe {
-    [
-      std::ptr::read_unaligned(gps as *const i32),
-      std::ptr::read_unaligned((gps + 4) as *const i32),
-      std::ptr::read_unaligned((gps + 8) as *const i32),
-      std::ptr::read_unaligned((gps + 12) as *const i32),
-    ]
+  let (x, y) = cursor(gps);
+  let (fg, bright) = unsafe {
+    (
+      std::ptr::read_unaligned((gps + GPS_SCREENF) as *const i8),
+      std::ptr::read_unaligned((gps + GPS_SCREENBRIGHT) as *const i8),
+    )
   };
-  let mut payload = format!("{}\t{}\t{}\t{}\t{}\t", func as char, fields[0], fields[1], fields[2], fields[3]).into_bytes();
+  let mut payload = format!("{}\t{}\t{}\t{}\t{}\t", func as char, x, y, fg, bright).into_bytes();
   payload.extend_from_slice(key);
   if send_entry(b'D', payload) {
     PROBED.fetch_add(1, Ordering::Relaxed);
@@ -177,8 +197,8 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag={}, screen_probe={}",
-    EXPERIMENTS.addst_flag,
+    "ai: experiments: addst_flag_off={}, screen_probe={}",
+    EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.screen_probe
   );
 }
