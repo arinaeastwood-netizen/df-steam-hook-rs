@@ -100,6 +100,6 @@ pub fn lookup_all(key: &[u8]) -> Option<Vec<u8>> {
 /// собираются абзацы из строк, на которые игра режет длинный текст,
 /// и подставляется перевод строки с учётом её места в абзаце.
 /// Строка без перевода уходит в журнал для переводчика.
-pub fn lookup_screen(key: &[u8]) -> Option<Vec<u8>> {
-  ai::screen(key, lookup_all)
+pub fn lookup_screen(gps: usize, key: &[u8]) -> Option<Vec<u8>> {
+  ai::screen(gps, key, lookup_all)
 }

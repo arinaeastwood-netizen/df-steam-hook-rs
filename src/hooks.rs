@@ -60,8 +60,9 @@ const CSTR_PLUS_STRING_PROLOGUE: [u8; 16] = [
 ];
 
 /// graphicst::addcoloredst(const char* text, const char* colors): вывод
-/// строки с отдельным цветом каждой буквы. Пока только замер — проверяем,
-/// не ею ли выводятся мысли и характер дварфа.
+/// строки с отдельным цветом каждой буквы — так игра рисует мысли и
+/// характер дварфа. Цвет буквы: биты 0–2 — цвет текста, 3–5 — фона,
+/// 6 — яркость. Аварийный выключатель — строка colored_off.
 const ADDCOLOREDST: usize = 0xa99320;
 const ADDCOLOREDST_PROLOGUE: [u8; 16] = [
   0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57,
@@ -94,10 +95,10 @@ pub unsafe fn attach_all() -> Result<()> {
       CSTR_PLUS_ATTACHED.store(true, Ordering::Relaxed);
       log::info!("cstr_plus_string hook attached");
     }
-    if crate::ai::EXPERIMENTS.screen_probe && extra_ok(ADDCOLOREDST, &ADDCOLOREDST_PROLOGUE) {
+    if !crate::ai::EXPERIMENTS.colored_off && extra_ok(ADDCOLOREDST, &ADDCOLOREDST_PROLOGUE) {
       attach_addcoloredst()?;
       ADDCOLOREDST_ATTACHED.store(true, Ordering::Relaxed);
-      log::info!("addcoloredst probe attached");
+      log::info!("addcoloredst hook attached");
     }
   }
   if CONFIG.settings.enable_search && CONFIG.encoding.parsed {
@@ -276,7 +277,7 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
     match s.to_bytes_without_nul() {
       converted => match {
         crate::ai::probe(b'A', gps, converted);
-        dictionary::lookup_screen(converted)
+        dictionary::lookup_screen(gps, converted)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
@@ -304,7 +305,7 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
     match s.to_bytes_without_nul() {
       converted => match {
         crate::ai::probe(b'T', gps, converted);
-        dictionary::lookup_screen(converted)
+        dictionary::lookup_screen(gps, converted)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
@@ -334,7 +335,7 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
     match s.to_bytes_without_nul() {
       converted => match {
         crate::ai::probe(b'F', gps, converted);
-        dictionary::lookup_screen(converted)
+        dictionary::lookup_screen(gps, converted)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
@@ -370,9 +371,10 @@ fn cstr_plus_string(result: usize, lhs: *const c_char, rhs: usize) -> usize {
     }
     match dictionary::lookup(bytes) {
       Some(translate) => {
-        // Значение словаря уже заканчивается нулём — это готовая C-строка
-        let (ptr, _, _) = translate.into_raw_parts();
-        original!(result, ptr as *const c_char, rhs)
+        // Значение словаря уже заканчивается нулём — это готовая C-строка.
+        // Склейка копирует её в результат, поэтому буфер освобождается
+        // после вызова — без утечки
+        original!(result, translate.as_ptr() as *const c_char, rhs)
       }
       None => original!(result, lhs, rhs),
     }
@@ -383,11 +385,18 @@ fn cstr_plus_string(result: usize, lhs: *const c_char, rhs: usize) -> usize {
 #[cfg_attr(target_os = "linux", hook(bypass))]
 fn addcoloredst(gps: usize, text: *const c_char, colors: *const u8) {
   unsafe {
-    if !text.is_null() {
-      let bytes = std::ffi::CStr::from_ptr(text).to_bytes();
-      crate::ai::probe(b'C', gps, bytes);
+    if text.is_null() || colors.is_null() {
+      return original!(gps, text, colors);
     }
-    original!(gps, text, colors)
+    let bytes = std::ffi::CStr::from_ptr(text).to_bytes();
+    crate::ai::probe(b'C', gps, bytes);
+    let original_colors = std::slice::from_raw_parts(colors, bytes.len());
+    match crate::ai::colored(gps, bytes, original_colors) {
+      // Функция читает текст и цвета только во время вызова, поэтому
+      // буферы живут до его конца и освобождаются — без утечки
+      Some((new_text, new_colors)) => original!(gps, new_text.as_ptr() as *const c_char, new_colors.as_ptr()),
+      None => original!(gps, text, colors),
+    }
   }
 }
 

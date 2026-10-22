@@ -36,6 +36,9 @@
 //!   D — диагностика (эксперимент screen_probe): функция вывода, первые
 //!       четыре числа структуры графики игры и сам текст;
 //!   S — строка с экрана как есть;
+//!   G — надпись в окне дварфийки, для которой нужна женская форма;
+//!   Q — блок цветного текста: строки через 0x1F, у каждой после 0x1E
+//!       цвета букв шестнадцатеричными цифрами;
 //!   R — абзац: его строки через 0x1F, в точности как на экране.
 
 use std::collections::{HashMap, HashSet};
@@ -140,10 +143,16 @@ static AI_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 /// Строки абзаца, который сейчас выводится на экран.
 /// missed — у строки не нашлось никакого перевода.
+/// x0 — с какого столбца начинается абзац, last_y — ряд последней строки.
+/// Следующая строка абзаца стоит ровно рядом ниже с того же края: так
+/// перенос строки отличается от надписи, нарисованной в другом месте
+/// (например, «Кликните, чтобы вернуть…» на десять рядов ниже текста).
 struct Run {
   lines: Vec<Vec<u8>>,
   missed: Vec<bool>,
   bytes: usize,
+  x0: i32,
+  last_y: i32,
 }
 
 static RUN: LazyLock<Mutex<Run>> = LazyLock::new(|| {
@@ -151,8 +160,89 @@ static RUN: LazyLock<Mutex<Run>> = LazyLock::new(|| {
     lines: Vec::new(),
     missed: Vec::new(),
     bytes: 0,
+    x0: 0,
+    last_y: 0,
   })
 });
+
+type RunParts = (Vec<Vec<u8>>, Vec<bool>);
+
+fn take_run(run: &mut Run) -> RunParts {
+  let lines = std::mem::take(&mut run.lines);
+  let missed = std::mem::take(&mut run.missed);
+  run.bytes = 0;
+  (lines, missed)
+}
+
+// ==================== ПОЛ В ОКНЕ ====================
+//
+// В окне дварфа рядом с возрастом рисуется значок пола: ♀ (байт 0x0C в
+// шрифте игры) или ♂ (0x0B). Надписи того же окна — «Здоров»,
+// «Болтливый» — игра выводит одинаково для обоих полов. Пока значок ♀
+// виден (окно перерисовывается каждый кадр), хук ищет для надписей
+// женскую форму: ключ с приставкой 0x1B 'f'.
+
+const GENDER_NONE: u8 = 0;
+const GENDER_FEMALE: u8 = 1;
+const GENDER_MALE: u8 = 2;
+/// Сколько миллисекунд значок пола действует после того, как нарисован.
+const GENDER_TTL_MS: u64 = 150;
+
+static GENDER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(GENDER_NONE);
+static GENDER_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STARTED: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+
+fn now_ms() -> u64 {
+  STARTED.elapsed().as_millis() as u64
+}
+
+fn note_gender(key: &[u8]) {
+  let gender = if key.contains(&0x0c) {
+    GENDER_FEMALE
+  } else if key.contains(&0x0b) {
+    GENDER_MALE
+  } else {
+    return;
+  };
+  GENDER.store(gender, Ordering::Relaxed);
+  GENDER_AT.store(now_ms(), Ordering::Relaxed);
+}
+
+fn female_context() -> bool {
+  GENDER.load(Ordering::Relaxed) == GENDER_FEMALE
+    && now_ms().saturating_sub(GENDER_AT.load(Ordering::Relaxed)) <= GENDER_TTL_MS
+}
+
+/// Надпись, у которой может быть женская форма: короткая, без цифр,
+/// с буквами, не больше четырёх слов.
+fn gender_candidate(key: &[u8]) -> bool {
+  let inner = trim_spaces(key);
+  if inner.len() < 3 || inner.len() > 60 || inner.iter().any(|b| b.is_ascii_digit()) {
+    return false;
+  }
+  if inner.contains(&0x0c) || inner.contains(&0x0b) {
+    return false;
+  }
+  let letters = inner.iter().filter(|&&b| b.is_ascii_alphabetic() || b >= 0x80).count();
+  let words = inner.split(|&b| b == b' ').filter(|w| !w.is_empty()).count();
+  letters >= 3 && words <= 4
+}
+
+/// Обычный поиск с учётом пола: при видимом ♀ сначала женская форма.
+/// Надпись, для которой женской формы ещё нет, записывается в журнал
+/// (тип G) — приложение решит, меняется ли она.
+fn plain_gendered(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+  if female_context() && gender_candidate(key) {
+    let mut gkey = Vec::with_capacity(key.len() + 2);
+    gkey.extend_from_slice(&[0x1b, b'f']);
+    gkey.extend_from_slice(key);
+    if let Some(value) = lookup(&gkey) {
+      return Some(value);
+    }
+    send_entry(b'G', key.to_vec());
+  }
+  plain(key)
+}
 
 struct MissState {
   seen: HashSet<Vec<u8>>,
@@ -179,6 +269,8 @@ pub struct Experiments {
   pub addst_flag_off: bool,
   /// Аварийный выключатель перехвата склейки «константа + строка»
   pub cstr_plus_off: bool,
+  /// Аварийный выключатель перевода цветного текста (addcoloredst)
+  pub colored_off: bool,
   pub screen_probe: bool,
 }
 
@@ -188,6 +280,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
   Experiments {
     addst_flag_off: has("addst_flag_off"),
     cstr_plus_off: has("cstr_plus_off"),
+    colored_off: has("colored_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -279,9 +372,10 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
+    EXPERIMENTS.colored_off,
     EXPERIMENTS.screen_probe
   );
 }
@@ -341,7 +435,7 @@ fn context_key(lines: &[Vec<u8>]) -> Vec<u8> {
 
 /// Обычный поиск строки с записью промаха в журнал.
 fn plain_or_miss(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
-  match plain(key) {
+  match plain_gendered(key, plain) {
     Some(value) => Some(value),
     None => {
       report_miss(key);
@@ -352,7 +446,9 @@ fn plain_or_miss(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<
 
 /// Строка, выводимая на экран: сборка абзаца, перевод с контекстом,
 /// запись промахов. plain — обычный поиск по словарям.
-pub fn screen(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+pub fn screen(gps: usize, key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+  note_gender(key);
+  let (x, y) = cursor(gps);
   let continues = continues_paragraph(key);
 
   let mut run = match RUN.try_lock() {
@@ -361,22 +457,35 @@ pub fn screen(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>
     Err(_) => return plain_or_miss(key, plain),
   };
 
+  // Строка не на следующем ряду с того же края — прежний абзац
+  // закончился на предыдущей строке
+  let adjacent = !run.lines.is_empty() && x == run.x0 && y == run.last_y + 1;
+  let broken = if !run.lines.is_empty() && !adjacent {
+    Some(take_run(&mut run))
+  } else {
+    None
+  };
+
   // Самый частый случай: обычная надпись вне абзаца
   if run.lines.is_empty() && !continues {
     drop(run);
+    if let Some((lines, missed)) = broken {
+      finish_run(lines, missed);
+    }
     return plain_or_miss(key, plain);
   }
 
   // Цепочка разрослась сверх меры — это не абзац; сбрасываем её
   let overflow = if run.lines.len() >= RUN_MAX_LINES || run.bytes + key.len() > RUN_MAX_BYTES {
-    let lines = std::mem::take(&mut run.lines);
-    let missed = std::mem::take(&mut run.missed);
-    run.bytes = 0;
-    Some((lines, missed))
+    Some(take_run(&mut run))
   } else {
     None
   };
 
+  if run.lines.is_empty() {
+    run.x0 = x;
+  }
+  run.last_y = y;
   run.lines.push(key.to_vec());
   run.bytes += key.len();
 
@@ -387,21 +496,17 @@ pub fn screen(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>
   };
   let result = match in_context {
     Some(value) => Some(value),
-    None => plain(key),
+    None => plain_gendered(key, plain),
   };
   run.missed.push(result.is_none());
 
-  let finished = if continues {
-    None
-  } else {
-    let lines = std::mem::take(&mut run.lines);
-    let missed = std::mem::take(&mut run.missed);
-    run.bytes = 0;
-    Some((lines, missed))
-  };
+  let finished = if continues { None } else { Some(take_run(&mut run)) };
 
   drop(run);
 
+  if let Some((lines, missed)) = broken {
+    finish_run(lines, missed);
+  }
   if let Some((lines, missed)) = overflow {
     finish_lines(&lines, &missed);
   }
@@ -409,6 +514,168 @@ pub fn screen(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>
     finish_run(lines, missed);
   }
 
+  result
+}
+
+// ==================== ЦВЕТНОЙ ТЕКСТ ====================
+//
+// addcoloredst рисует строку с отдельным цветом каждой буквы: так игра
+// выводит мысли и характер дварфа. Строки блока стоят подряд с одного
+// края (пустая строка — граница абзаца). Блок записывается в журнал
+// целиком, вместе с цветами (тип Q), приложение переводит его и
+// возвращает строки с метками цвета: байт 0x1C и две шестнадцатеричные
+// цифры задают цвет следующих букв. Ключи словаря:
+//   0x1E + строки блока до текущей через 0x1F — строка абзаца;
+//   0x1D + строка — самостоятельная строка (например, мысль).
+
+const COLORED_MAX_LINES: usize = 80;
+const COLORED_MAX_BYTES: usize = 16_000;
+
+struct ColoredLine {
+  text: Vec<u8>,
+  colors: Vec<u8>,
+}
+
+struct ColoredRun {
+  lines: Vec<ColoredLine>,
+  missed: Vec<bool>,
+  x0: i32,
+  last_y: i32,
+}
+
+static COLORED: LazyLock<Mutex<ColoredRun>> = LazyLock::new(|| {
+  Mutex::new(ColoredRun {
+    lines: Vec::new(),
+    missed: Vec::new(),
+    x0: 0,
+    last_y: 0,
+  })
+});
+
+fn colored_block_key(lines: &[ColoredLine]) -> Vec<u8> {
+  let mut key = vec![0x1e];
+  for (i, line) in lines.iter().enumerate() {
+    if i > 0 {
+      key.push(LINE_SEPARATOR);
+    }
+    key.extend_from_slice(&line.text);
+  }
+  key
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+  match b {
+    b'0'..=b'9' => Some(b - b'0'),
+    b'a'..=b'f' => Some(b - b'a' + 10),
+    b'A'..=b'F' => Some(b - b'A' + 10),
+    _ => None,
+  }
+}
+
+/// Перевод с метками цвета → текст с нулём на конце и цвет каждой буквы.
+/// Буквы до первой метки получают цвет первой буквы оригинала.
+fn decode_colored(value: &[u8], original: &[u8]) -> (Vec<u8>, Vec<u8>) {
+  let value = match value.last() {
+    Some(0) => &value[..value.len() - 1],
+    _ => value,
+  };
+  let mut text = Vec::with_capacity(value.len() + 1);
+  let mut colors = Vec::with_capacity(value.len() + 1);
+  let mut current = original.first().copied().unwrap_or(7);
+
+  let mut i = 0;
+  while i < value.len() {
+    if value[i] == 0x1c && i + 2 < value.len() {
+      if let (Some(h), Some(l)) = (hex_digit(value[i + 1]), hex_digit(value[i + 2])) {
+        current = (h << 4) | l;
+        i += 3;
+        continue;
+      }
+    }
+    text.push(value[i]);
+    colors.push(current);
+    i += 1;
+  }
+  text.push(0);
+  colors.push(current);
+  (text, colors)
+}
+
+fn hex_bytes(bytes: &[u8]) -> Vec<u8> {
+  const DIGITS: &[u8; 16] = b"0123456789abcdef";
+  let mut out = Vec::with_capacity(bytes.len() * 2);
+  for &b in bytes {
+    out.push(DIGITS[(b >> 4) as usize]);
+    out.push(DIGITS[(b & 15) as usize]);
+  }
+  out
+}
+
+/// Блок закончился: если в нём есть строки без перевода, он уходит в
+/// журнал целиком — строки с цветами.
+fn finish_colored(lines: Vec<ColoredLine>, missed: Vec<bool>) {
+  if !missed.iter().any(|&m| m) {
+    return;
+  }
+  let mut payload = Vec::new();
+  for (i, line) in lines.iter().enumerate() {
+    if i > 0 {
+      payload.push(LINE_SEPARATOR);
+    }
+    payload.extend_from_slice(&line.text);
+    payload.push(0x1e);
+    payload.extend_from_slice(&hex_bytes(&line.colors));
+  }
+  if payload.len() <= COLORED_MAX_BYTES {
+    send_entry(b'Q', payload);
+  }
+}
+
+/// Строка цветного текста: сборка блока, перевод, запись промахов.
+/// Возвращает текст с нулём на конце и цвета букв той же длины.
+pub fn colored(gps: usize, text: &[u8], colors: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+  let (x, y) = cursor(gps);
+  let mut run = match COLORED.try_lock() {
+    Ok(run) => run,
+    Err(_) => return None,
+  };
+
+  let adjacent = !run.lines.is_empty() && x == run.x0 && y == run.last_y + 1;
+  let too_long = run.lines.len() >= COLORED_MAX_LINES;
+  let broken = if !run.lines.is_empty() && (!adjacent || too_long) {
+    let lines = std::mem::take(&mut run.lines);
+    let missed = std::mem::take(&mut run.missed);
+    Some((lines, missed))
+  } else {
+    None
+  };
+
+  if run.lines.is_empty() {
+    run.x0 = x;
+  }
+  run.last_y = y;
+  run.lines.push(ColoredLine {
+    text: text.to_vec(),
+    colors: colors.to_vec(),
+  });
+
+  let value = if AI_SIZE.load(Ordering::Relaxed) > 0 {
+    lookup(&colored_block_key(&run.lines)).or_else(|| {
+      let mut key = Vec::with_capacity(text.len() + 1);
+      key.push(0x1d);
+      key.extend_from_slice(text);
+      lookup(&key)
+    })
+  } else {
+    None
+  };
+  let result = value.map(|v| decode_colored(&v, colors));
+  run.missed.push(result.is_none() && worth_logging(text));
+
+  drop(run);
+  if let Some((lines, missed)) = broken {
+    finish_colored(lines, missed);
+  }
   result
 }
 
