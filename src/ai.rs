@@ -32,13 +32,14 @@
 //!
 //! Формат записи журнала: тип, табуляция, текст.
 //!   # — метка сеанса, всегда первая строка файла;
+//!   U — ключ из словаря нейроперевода, который пригодился в этом сеансе;
 //!   S — строка с экрана как есть;
 //!   R — абзац: его строки через 0x1F, в точности как на экране.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -71,7 +72,15 @@ const PARAGRAPH_MIN_SPACES: usize = 2;
 /// Русская фраза длиннее этого — уже не склейка игры, а текст.
 const RUSSIAN_MAX_LEN: usize = 200;
 
-static AI_DICTIONARY: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+/// Запись второго словаря. used — перевод уже пригодился после
+/// последней перезагрузки словаря: об использовании сообщается один
+/// раз, а не на каждом кадре.
+struct AiEntry {
+  value: Vec<u8>,
+  used: AtomicBool,
+}
+
+static AI_DICTIONARY: LazyLock<RwLock<HashMap<Vec<u8>, AiEntry>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Число записей во втором словаре. Пока он пуст, поиск в нём
 /// пропускается целиком, без взятия блокировки.
@@ -123,10 +132,17 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
   if AI_SIZE.load(Ordering::Relaxed) == 0 {
     return None;
   }
-  match AI_DICTIONARY.try_read() {
-    Ok(map) => map.get(key).cloned(),
-    Err(_) => None,
+  let map = AI_DICTIONARY.try_read().ok()?;
+  let entry = map.get(key)?;
+  let value = entry.value.clone();
+
+  // Первое использование перевода после загрузки словаря — сообщаем
+  // приложению: по этим отметкам оно убирает в архив переводы, которые
+  // игра давно не показывала (имена погибших, названия старых миров)
+  if !entry.used.swap(true, Ordering::Relaxed) {
+    send_entry(b'U', key.to_vec());
   }
+  Some(value)
 }
 
 /// Строка, после которой абзац продолжается: заканчивается пробелом
@@ -283,7 +299,14 @@ fn send_entry(kind: u8, payload: Vec<u8>) {
     Err(_) => return,
   };
 
-  if state.tx.is_none() || state.seen.len() >= MAX_SEEN || state.seen.contains(payload.as_slice()) {
+  // Повторы отсекаются с учётом типа записи: строка, которая в начале
+  // сеанса пришла без перевода (S), после перевода придёт ещё раз как
+  // использованная (U) — и это разные события
+  let mut tagged = Vec::with_capacity(payload.len() + 1);
+  tagged.push(kind);
+  tagged.extend_from_slice(&payload);
+
+  if state.tx.is_none() || state.seen.len() >= MAX_SEEN || state.seen.contains(tagged.as_slice()) {
     return;
   }
 
@@ -300,7 +323,7 @@ fn send_entry(kind: u8, payload: Vec<u8>) {
   // В «увиденные» запись попадает только после успешной отправки:
   // если очередь была переполнена, она уйдёт в следующий раз
   if sent {
-    state.seen.insert(payload);
+    state.seen.insert(tagged);
   }
 }
 
@@ -458,6 +481,18 @@ fn start_reloader() {
           Some(_) => match Dictionary::load(PATH_AI_DICTIONARY) {
             Ok(map) => {
               let size = map.len();
+              let map: HashMap<Vec<u8>, AiEntry> = map
+                .into_iter()
+                .map(|(k, v)| {
+                  (
+                    k,
+                    AiEntry {
+                      value: v,
+                      used: AtomicBool::new(false),
+                    },
+                  )
+                })
+                .collect();
               if let Ok(mut guard) = AI_DICTIONARY.write() {
                 *guard = map;
                 AI_SIZE.store(size, Ordering::Relaxed);
