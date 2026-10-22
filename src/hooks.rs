@@ -20,6 +20,20 @@ static ENABLER: usize = unsafe {
   }
 };
 
+/// Установлен ли перехват addst_flag. Если нет, включать и выключать
+/// его нельзя: неустановленный перехват вернёт ошибку и сорвёт
+/// включение остальных.
+static ADDST_FLAG_ATTACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn addst_flag_wanted() -> bool {
+  if cfg!(target_os = "linux") {
+    return true;
+  }
+  // Без адреса функции в offsets.toml перехват ставить нельзя
+  let has_offset = CONFIG.offset.as_ref().map_or(false, |o| o.addst_flag.is_some());
+  crate::ai::EXPERIMENTS.addst_flag && has_offset
+}
+
 pub unsafe fn attach_all() -> Result<()> {
   if CONFIG.settings.enable_translation {
     attach_string_copy_n()?;
@@ -29,7 +43,11 @@ pub unsafe fn attach_all() -> Result<()> {
     attach_std_string_assign()?;
     attach_addst()?;
     attach_addst_top()?;
-    attach_addst_flag()?;
+    if addst_flag_wanted() {
+      attach_addst_flag()?;
+      ADDST_FLAG_ATTACHED.store(true, std::sync::atomic::Ordering::Relaxed);
+      log::info!("addst_flag hook attached");
+    }
   }
   if CONFIG.settings.enable_search && CONFIG.encoding.parsed {
     attach_standardstringentry()?;
@@ -50,7 +68,9 @@ pub unsafe fn enable_translation() -> Result<()> {
   enable_std_string_assign()?;
   enable_addst()?;
   enable_addst_top()?;
-  enable_addst_flag()?;
+  if ADDST_FLAG_ATTACHED.load(std::sync::atomic::Ordering::Relaxed) {
+    enable_addst_flag()?;
+  }
   Ok(())
 }
 
@@ -78,7 +98,9 @@ pub unsafe fn disable_translation() -> Result<()> {
   disable_std_string_assign()?;
   disable_addst()?;
   disable_addst_top()?;
-  disable_addst_flag()?;
+  if ADDST_FLAG_ATTACHED.load(std::sync::atomic::Ordering::Relaxed) {
+    disable_addst_flag()?;
+  }
   Ok(())
 }
 
@@ -189,7 +211,10 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match dictionary::lookup_screen(converted) {
+      converted => match {
+        crate::ai::probe(b'A', gps, converted);
+        dictionary::lookup_screen(converted)
+      } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
@@ -214,7 +239,10 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match dictionary::lookup_screen(converted) {
+      converted => match {
+        crate::ai::probe(b'T', gps, converted);
+        dictionary::lookup_screen(converted)
+      } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
@@ -233,13 +261,18 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
   }
 }
 
-#[cfg_attr(target_os = "windows", hook(bypass))]
+// На Windows dfint этот перехват отключил (март 2024, без пояснения).
+// Здесь он включается только экспериментом addst_flag — см. ai.rs
+#[cfg_attr(target_os = "windows", hook(by_offset))]
 #[cfg_attr(target_os = "linux", hook(by_symbol))]
 fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match dictionary::lookup_screen(converted) {
+      converted => match {
+        crate::ai::probe(b'F', gps, converted);
+        dictionary::lookup_screen(converted)
+      } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);

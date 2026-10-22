@@ -17,3 +17,4 @@ pub const PATH_DICTIONARY: &'static str = "./dfint-data/dictionary.csv";
 pub const PATH_AI_DIR: &'static str = "./dfint-data/ai";
 pub const PATH_AI_DICTIONARY: &'static str = "./dfint-data/ai/dictionary_ai.csv";
 pub const PATH_AI_MISSES: &'static str = "./dfint-data/ai/misses.txt";
+pub const PATH_AI_EXPERIMENTS: &'static str = "./dfint-data/ai/experiments.txt";
