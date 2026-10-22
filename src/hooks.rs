@@ -89,7 +89,7 @@ pub unsafe fn attach_all() -> Result<()> {
       ADDST_FLAG_ATTACHED.store(true, Ordering::Relaxed);
       log::info!("addst_flag hook attached");
     }
-    if extra_ok(CSTR_PLUS_STRING, &CSTR_PLUS_STRING_PROLOGUE) {
+    if !crate::ai::EXPERIMENTS.cstr_plus_off && extra_ok(CSTR_PLUS_STRING, &CSTR_PLUS_STRING_PROLOGUE) {
       attach_cstr_plus_string()?;
       CSTR_PLUS_ATTACHED.store(true, Ordering::Relaxed);
       log::info!("cstr_plus_string hook attached");
@@ -362,8 +362,12 @@ fn cstr_plus_string(result: usize, lhs: *const c_char, rhs: usize) -> usize {
       return original!(result, lhs, rhs);
     }
     let bytes = std::ffi::CStr::from_ptr(lhs).to_bytes();
-    // Только словарь сообщества и без записи в журнал: среди склеек есть
-    // служебные строки (пути к файлам), которые переводить нельзя
+    // Только фразы, только словарь сообщества и без записи в журнал:
+    // через эту склейку игра собирает и служебные имена — см.
+    // concat_fragment_allowed
+    if !crate::ai::concat_fragment_allowed(bytes) {
+      return original!(result, lhs, rhs);
+    }
     match dictionary::lookup(bytes) {
       Some(translate) => {
         // Значение словаря уже заканчивается нулём — это готовая C-строка

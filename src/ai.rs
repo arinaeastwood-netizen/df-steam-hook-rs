@@ -127,6 +127,8 @@ pub struct Experiments {
   /// Перехват addst_flag теперь включён всегда; эта строка в файле —
   /// аварийный выключатель на случай вылетов
   pub addst_flag_off: bool,
+  /// Аварийный выключатель перехвата склейки «константа + строка»
+  pub cstr_plus_off: bool,
   pub screen_probe: bool,
 }
 
@@ -135,6 +137,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
   let has = |name: &str| text.lines().any(|l| l.trim() == name);
   Experiments {
     addst_flag_off: has("addst_flag_off"),
+    cstr_plus_off: has("cstr_plus_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -150,6 +153,29 @@ const GPS_SCREENX: usize = 0x84;
 const GPS_SCREENY: usize = 0x88;
 const GPS_SCREENF: usize = 0x8c;
 const GPS_SCREENBRIGHT: usize = 0x8e;
+
+/// Связки, которыми игра соединяет части описания характера.
+const CONNECTORS: [&[u8]; 4] = [b", and ", b", though ", b", although ", b", even though "];
+
+/// Можно ли переводить кусок, который игра склеивает со строкой.
+///
+/// Через ту же склейку игра собирает и текст для экрана, и служебные
+/// имена при загрузке мира. Перевод служебного куска («'s », «thick »)
+/// ломает имя, по которому игра ищет слово, — загрузка падает с ошибкой
+/// «Missing Word Definition». Поэтому переводятся только фразы: не
+/// меньше двух пробелов внутри, только печатные латинские символы, —
+/// и несколько связок описания характера.
+pub fn concat_fragment_allowed(key: &[u8]) -> bool {
+  if CONNECTORS.contains(&key) {
+    return true;
+  }
+  if !key.iter().all(|&b| (0x20..0x7f).contains(&b)) {
+    return false;
+  }
+  let inner = trim_spaces(key);
+  let spaces = inner.iter().filter(|&&b| b == b' ').count();
+  spaces >= 2 && inner.iter().any(|b| b.is_ascii_lowercase())
+}
 
 /// Позиция, с которой будет нарисован следующий текст.
 pub fn cursor(gps: usize) -> (i32, i32) {
@@ -197,8 +223,9 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
+    EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.screen_probe
   );
 }
