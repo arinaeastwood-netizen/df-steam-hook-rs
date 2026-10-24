@@ -39,7 +39,8 @@
 //!   G — надпись в окне дварфийки, для которой нужна женская форма;
 //!   Q — блок цветного текста: строки через 0x1F, у каждой после 0x1E
 //!       цвета букв шестнадцатеричными цифрами;
-//!   R — абзац: его строки через 0x1F, в точности как на экране.
+//!   R — абзац: его строки через 0x1F, в точности как на экране;
+//!   L — фраза, которую игра рисует по слову (летопись): см. flow.rs.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -271,6 +272,8 @@ pub struct Experiments {
   pub cstr_plus_off: bool,
   /// Аварийный выключатель перевода цветного текста (addcoloredst)
   pub colored_off: bool,
+  /// Аварийный выключатель перевода фраз, которые игра рисует по слову (flow.rs)
+  pub flow_off: bool,
   pub screen_probe: bool,
 }
 
@@ -281,6 +284,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     addst_flag_off: has("addst_flag_off"),
     cstr_plus_off: has("cstr_plus_off"),
     colored_off: has("colored_off"),
+    flow_off: has("flow_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -335,6 +339,17 @@ pub fn cursor(gps: usize) -> (i32, i32) {
   }
 }
 
+/// Перенос позиции, с которой будет нарисован следующий текст.
+pub fn set_cursor(gps: usize, x: i32, y: i32) {
+  if gps == 0 {
+    return;
+  }
+  unsafe {
+    std::ptr::write_unaligned((gps + GPS_SCREENX) as *mut i32, x);
+    std::ptr::write_unaligned((gps + GPS_SCREENY) as *mut i32, y);
+  }
+}
+
 /// Диагностика: функция вывода (A — addst, T — addst_top, F — addst_flag,
 /// C — addcoloredst), позиция на экране, цвет и текст. Одинаковый текст
 /// в том же месте экрана пишется один раз.
@@ -372,10 +387,11 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.colored_off,
+    EXPERIMENTS.flow_off,
     EXPERIMENTS.screen_probe
   );
 }
@@ -736,7 +752,7 @@ fn finish_run(lines: Vec<Vec<u8>>, missed: Vec<bool>) {
 }
 
 /// Отправка записи в журнал с проверкой повторов.
-fn send_entry(kind: u8, payload: Vec<u8>) -> bool {
+pub(crate) fn send_entry(kind: u8, payload: Vec<u8>) -> bool {
   let mut state = match MISSES.try_lock() {
     Ok(state) => state,
     Err(_) => return false,

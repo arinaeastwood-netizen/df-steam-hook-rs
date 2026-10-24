@@ -269,30 +269,66 @@ fn std_string_assign(dst: *const u8, src: *const u8) -> *const u8 {
   }
 }
 
+/// addst выводит строку с позиции курсора. Кроме обычного поиска
+/// перевода здесь работают фразы, которые игра рисует по слову (flow.rs):
+/// слово либо выводится как обычно (со сдвигом временной раскладки),
+/// либо вместо него рисуются куски перевода всей фразы.
 #[cfg_attr(target_os = "windows", hook(by_offset))]
 #[cfg_attr(target_os = "linux", hook(by_symbol))]
 fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
-    match s.to_bytes_without_nul() {
-      converted => match {
-        crate::ai::probe(b'A', gps, converted);
-        dictionary::lookup_screen(gps, converted)
-      } {
-        Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
-          let mut cxxstr = CxxString::new(ptr, len - 1);
+    let converted = s.to_bytes_without_nul();
+    crate::ai::probe(b'A', gps, converted);
+
+    let shift = match crate::flow::begin(gps, converted, justify) {
+      crate::flow::Plan::Pieces(pieces) => {
+        // Куски перевода фразы — каждый в свою клетку. Буфер живёт до
+        // конца вызова: игра копирует текст на экран и указатель не хранит.
+        // Не меньше 16 байт: короткую строку конструктор читает целым буфером
+        let (x, y) = crate::ai::cursor(gps);
+        let len = converted.len() as i32;
+        for (px, py, text) in pieces {
+          let n = text.len();
+          let mut buf = text;
+          buf.resize(n.max(16) + 1, 0);
+          let mut cxxstr = CxxString::new(buf.as_mut_ptr(), n);
           #[cfg(target_os = "linux")]
           {
             if cxxstr.len < 16 {
               cxxstr.ptr = cxxstr.sso.buf.as_mut_ptr();
             }
           }
-          original!(gps, cxxstr.as_ptr(), justify, space)
+          crate::ai::set_cursor(gps, px, py);
+          original!(gps, cxxstr.as_ptr(), justify, space);
         }
-        _ => original!(gps, src, justify, space),
-      },
-      _ => original!(gps, src, justify, space),
+        // Курсор — как после вывода самого слова
+        crate::ai::set_cursor(gps, x + len, y);
+        return;
+      }
+      crate::flow::Plan::Normal { shift } => shift,
+    };
+
+    // Поиск перевода — до сдвига: сборка абзацев смотрит на позицию курсора
+    let translated = dictionary::lookup_screen(gps, converted);
+    if shift != 0 {
+      let (x, y) = crate::ai::cursor(gps);
+      crate::ai::set_cursor(gps, x + shift, y);
+    }
+    match translated {
+      Some(translate) => {
+        crate::flow::drawn(converted.len(), translate.len().saturating_sub(1));
+        let (ptr, len, _) = translate.to_owned().into_raw_parts();
+        let mut cxxstr = CxxString::new(ptr, len - 1);
+        #[cfg(target_os = "linux")]
+        {
+          if cxxstr.len < 16 {
+            cxxstr.ptr = cxxstr.sso.buf.as_mut_ptr();
+          }
+        }
+        original!(gps, cxxstr.as_ptr(), justify, space)
+      }
+      None => original!(gps, src, justify, space),
     }
   }
 }
