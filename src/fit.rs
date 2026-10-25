@@ -41,6 +41,22 @@ const FRAME_FALLBACK: u32 = 30_000;
 /// их читает вывод символа (0xc0780: cmp r11d, [r9+0x288] / [r9+0x28c]).
 const GPS_CLIPX0: usize = 0x288;
 const GPS_CLIPX1: usize = 0x28c;
+const GPS_CLIPY0: usize = 0x290;
+const GPS_CLIPY1: usize = 0x294;
+
+/// Видна ли надпись, начатая в (x, y): клетка внутри рамки отсечения.
+/// Игра рисует и то, чего не видно, — например, список сохранений мира
+/// за пределами своей области. Такие надписи соседями не считаются:
+/// иначе невидимое «Крепость» на том же ряду обрезало имя мира
+/// («Мир: Гоматсил, "Легендарные»).
+fn visible(gps: usize, x: i32, y: i32) -> bool {
+  let read = |off: usize| unsafe { std::ptr::read_unaligned((gps + off) as *const i32) };
+  let (x0, x1, y0, y1) = (read(GPS_CLIPX0), read(GPS_CLIPX1), read(GPS_CLIPY0), read(GPS_CLIPY1));
+  if x1 < x0 || y1 < y0 || x1 > 2000 || y1 > 2000 {
+    return true;
+  }
+  x0 <= x && x <= x1 && y0 <= y && y <= y1
+}
 
 /// Сколько клеток до правого края рамки отсечения (включая клетку x).
 fn clip_room(gps: usize, x: i32) -> Option<usize> {
@@ -143,7 +159,9 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool) -> Optio
   let (x, y) = ai::cursor(gps);
   let text = drawn.unwrap_or(key);
   let mut tracker = TRACKER.try_lock().ok()?;
-  tracker.record(x, y, key.len());
+  if visible(gps, x, y) {
+    tracker.record(x, y, key.len());
+  }
   if flow {
     return None;
   }

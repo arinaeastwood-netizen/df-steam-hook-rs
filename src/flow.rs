@@ -316,7 +316,11 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
   let continues = match st.learn.last() {
     Some(last) => {
       let row_words = st.learn.iter().filter(|t| t.y == last.y).count();
+      // Знак препинания после выделенного цветом слова игра рисует
+      // отдельно и вплотную: «Bookkeeper» «.» — это продолжение фразы
+      let glued = matches!(key.first(), Some(b'.' | b',' | b';' | b':' | b'!' | b'?' | b')'));
       (y == last.y && x == last.x + last.text.len() as i32 + 1)
+        || (y == last.y && glued && x == last.x + last.text.len() as i32)
         || (y == last.y + 1 && x == st.learn[0].x && row_words >= 2)
     }
     None => false,
