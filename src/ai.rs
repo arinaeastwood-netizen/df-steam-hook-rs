@@ -480,12 +480,14 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.colored_off,
     EXPERIMENTS.flow_off,
     EXPERIMENTS.english,
+    EXPERIMENTS.fit_off,
+    EXPERIMENTS.align_off,
     EXPERIMENTS.screen_probe
   );
 }

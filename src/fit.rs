@@ -152,11 +152,60 @@ impl Tracker {
 /// на самом деле (перевод без завершающего нуля или None, если перевода
 /// нет). flow — слово фразы летописи: у неё своя раскладка.
 /// Возвращает, сколько байт надписи выводить, если её нужно обрезать.
+/// Сколько строк отладки места уже записано в лог (не больше LOG_LIMIT).
+static LOGGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const LOG_LIMIT: usize = 60;
+
+/// Запись в лог: надпись длиннее, чем разрешено игрой (space) или рамкой,
+/// и что с ней решено. По ней видно, доходит ли до хука ограничение.
+fn trace(x: i32, y: i32, text: &[u8], space: u32, clip: Option<usize>, decision: &str) {
+  use std::sync::atomic::Ordering;
+  if LOGGED.fetch_add(1, Ordering::Relaxed) >= LOG_LIMIT {
+    return;
+  }
+  log::info!(
+    "fit: ({x},{y}) len={} space={space} clip={:?} -> {decision}",
+    text.len(),
+    clip
+  );
+}
+
 pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u32) -> Option<usize> {
-  if !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off || gps == 0 || blank(key) {
+  if gps == 0 || blank(key) {
     return None;
   }
   let (x, y) = ai::cursor(gps);
+  // Отладка: надпись длиннее разрешённого — пишется в лог всегда, даже
+  // если механизм выключен, чтобы было видно, что приходит от игры
+  {
+    let text = drawn.unwrap_or(key);
+    let clip_now = clip_room(gps, x);
+    let over_space = space > 0 && text.len() > space as usize;
+    let over_clip = clip_now.is_some_and(|c| text.len() > c);
+    if over_space || over_clip {
+      let state = if flow {
+        "skip: flow word"
+      } else if over_space {
+        "abbreviate to space"
+      } else if !ai::EXPERIMENTS.english {
+        "skip: not english mode"
+      } else if ai::EXPERIMENTS.fit_off {
+        "skip: fit_off"
+      } else {
+        "abbreviate to clip"
+      };
+      trace(x, y, text, space, clip_now, state);
+    }
+    // Ограничение длины от самой игры (space) — настоящее всегда: игра
+    // обрежет надпись сама. Сокращение словами лучше обрубка в любом
+    // режиме, даже с выключенными «Надписями по месту»
+    if over_space && !flow && (!ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off) {
+      return Some(space as usize);
+    }
+  }
+  if !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off {
+    return None;
+  }
   let text = drawn.unwrap_or(key);
   let mut tracker = TRACKER.try_lock().ok()?;
   if visible(gps, x, y) {
