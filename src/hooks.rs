@@ -338,7 +338,7 @@ unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize,
       realign(gps, target, converted, translated.as_ref());
     }
     // Место для надписи: обрезка, если она налезает на соседа справа
-    let translated = fitted(gps, converted, translated, in_flow, space);
+    let translated = fitted(gps, converted, translated, in_flow, space, false);
     if shift != 0 {
       let (x, y) = crate::ai::cursor(gps);
       crate::ai::set_cursor(gps, x + shift, y);
@@ -375,9 +375,9 @@ fn realign(gps: usize, target: usize, key: &[u8], translated: Option<&Vec<u8>>) 
 /// Надпись с учётом места на экране (fit.rs): перевод или сама надпись,
 /// обрезанные за клетку до соседа справа. None — выводить как есть.
 /// Значение, как и в словаре, заканчивается нулём.
-fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool, space: u32) -> Option<Vec<u8>> {
+fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool, space: u32, column: bool) -> Option<Vec<u8>> {
   let drawn = translated.as_ref().map(|t| &t[..t.len().saturating_sub(1)]);
-  match crate::fit::settle(gps, key, drawn, in_flow, space) {
+  match crate::fit::settle(gps, key, drawn, in_flow, space, column) {
     Some(room) => {
       // Не помещается — сократить словами («Проф. шахтёр»), а не обрубить
       let text = drawn.unwrap_or(key);
@@ -413,7 +413,7 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
         // Четвёртый аргумент addst_flag — как space у addst: игра сама
         // сокращает надпись до этого числа знаков (0xa9943c), так рисуется
         // колонка навыка на странице «Труд»
-        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false, a4 as u32)
+        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false, a4 as u32, true)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();

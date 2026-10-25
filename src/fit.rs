@@ -86,6 +86,16 @@ struct Tracker {
   rows: HashMap<i32, Vec<(i32, u32)>>,
   /// Надпись → сколько кадров не помещалась, на каком кадре последний раз
   misses: HashMap<Vec<u8>, (u32, u32)>,
+  /// Колонки таблиц (addst_flag): столбец → кадр, длина самой длинной
+  /// английской надписи в колонке, ряды, где она встречалась
+  columns: HashMap<i32, Column>,
+}
+
+#[derive(Default)]
+struct Column {
+  gen: u32,
+  widest: usize,
+  rows: Vec<i32>,
 }
 
 static TRACKER: LazyLock<Mutex<Tracker>> = LazyLock::new(|| {
@@ -95,6 +105,7 @@ static TRACKER: LazyLock<Mutex<Tracker>> = LazyLock::new(|| {
     mark: None,
     rows: HashMap::new(),
     misses: HashMap::new(),
+    columns: HashMap::new(),
   })
 });
 
@@ -135,6 +146,36 @@ impl Tracker {
     }
   }
 
+  /// Надпись в колонке таблицы: запомнить её английскую длину. Колонка
+  /// живёт два кадра: прошлый (чтобы знать ряды ниже) и текущий.
+  fn column_note(&mut self, x: i32, y: i32, english_len: usize) {
+    if self.columns.len() > 256 {
+      let gen = self.gen;
+      self.columns.retain(|_, c| gen.wrapping_sub(c.gen) <= 1);
+    }
+    let gen = self.gen;
+    let col = self.columns.entry(x).or_default();
+    if gen.wrapping_sub(col.gen) > 1 {
+      *col = Column::default();
+    }
+    col.gen = gen;
+    col.widest = col.widest.max(english_len);
+    if !col.rows.contains(&y) {
+      col.rows.push(y);
+    }
+  }
+
+  /// Ширина колонки таблицы по английскому тексту: самая длинная
+  /// английская надпись колонки и запас в 3 клетки. Только если в колонке
+  /// хотя бы две надписи на разных рядах — одиночная надпись не колонка.
+  fn column_width(&self, x: i32) -> Option<usize> {
+    let col = self.columns.get(&x)?;
+    if self.gen.wrapping_sub(col.gen) > 1 || col.rows.len() < 2 {
+      return None;
+    }
+    Some(col.widest + 3)
+  }
+
   /// Сколько клеток до начала соседней надписи справа (с пробелом перед
   /// ней), если сосед ближе, чем кончается текст длиной len.
   fn room(&self, x: i32, y: i32, len: usize) -> Option<usize> {
@@ -170,7 +211,12 @@ fn trace(x: i32, y: i32, text: &[u8], space: u32, clip: Option<usize>, decision:
   );
 }
 
-pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u32) -> Option<usize> {
+/// column — надпись из addst_flag: так игра рисует колонки таблиц (навык
+/// на странице «Труд»). Справа от колонки игра рисует картинки (значки
+/// навыков), и они ложатся поверх длинной надписи: «Профессиональный шахт».
+/// Картинок хук не видит, поэтому ширину колонки он берёт по английскому
+/// тексту той же колонки: самая длинная английская надпись и 3 клетки.
+pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u32, column: bool) -> Option<usize> {
   if gps == 0 || blank(key) {
     return None;
   }
@@ -229,6 +275,22 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u
   let neighbor = match english_len {
     Some(len) => tracker.room(x, y, text.len()).filter(|&r| r >= len),
     None => None,
+  };
+  // Колонка таблицы: место по английскому тексту колонки
+  let column_room = if column {
+    if let Some(len) = english_len {
+      tracker.column_note(x, y, len);
+    }
+    tracker.column_width(x).filter(|&w| text.len() > w)
+  } else {
+    None
+  };
+  if let Some(w) = column_room {
+    trace(x, y, text, space, Some(w), "abbreviate to column");
+  }
+  let neighbor = match (neighbor, column_room) {
+    (Some(a), Some(b)) => Some(a.min(b)),
+    (a, b) => a.or(b),
   };
   // Край рамки — настоящий край, даже если в него не помещается и
   // английская надпись: колонка «Expert Miner» на странице «Труд» уже
