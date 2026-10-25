@@ -11,6 +11,7 @@ mod cxxstring;
 mod dictionary;
 mod encoding;
 mod align;
+mod align_scan;
 mod fit;
 mod flow;
 mod hooks;
@@ -62,6 +63,7 @@ extern "C" fn attach() {
     }
     // Нейроперевод: журнал промахов и второй словарь с горячей перезагрузкой
     ai::start();
+    align::start();
   }
 }
 

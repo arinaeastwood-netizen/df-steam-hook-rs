@@ -12,14 +12,12 @@
 //! сборке строк на этот расчёт не влияют: русская надпись начинается там,
 //! где начиналась бы английская, и съезжает вправо.
 //!
-//! Места, где игра так считает столбец, найдены разбором кода игры: для
-//! каждого вызова addst и addst_top прослежено, откуда берётся столбец,
-//! переданный в locate (или записанный в gps.screenx прямо). Если в нём
-//! есть «половина длины» (sar/shr на 1) — надпись по центру; «правый край
-//! минус длина» — по правому краю. Таблица — align_<метка>.txt, по
-//! адресам возврата этих вызовов; метка — отметка времени из заголовка
-//! exe, как у таблицы смещений dfint. Другая версия игры — таблица пуста,
-//! выравнивание не работает, остальное как обычно.
+//! Места, где игра так считает столбец, хук находит сам разбором кода
+//! игры (align_scan.rs) при первом запуске каждой версии и кладёт таблицу
+//! в dfint-data/ai/align_<метка>.txt; метка — отметка времени из
+//! заголовка exe, как у таблицы смещений dfint. Обновилась игра — таблица
+//! строится заново. Для 52.05 есть и встроенная таблица, проверенная
+//! вручную: на случай, если разбор не удался.
 //!
 //! Строка таблицы: «вид адрес вычитание источник»:
 //!   вид       — c (центр) или r (правый край);
@@ -40,10 +38,11 @@
 //! Аварийный выключатель — строка align_off в experiments.txt.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use crate::ai;
 use crate::config::CONFIG;
+use crate::constants::{PATH_AI_DIR, PATH_EXE};
 use crate::utils;
 
 #[derive(Clone, Copy)]
@@ -58,15 +57,17 @@ struct Site {
   literal: bool,
 }
 
+/// Встроенная таблица для версии, на которой разбор проверен вручную.
+/// Нужна, если разобрать exe не получилось.
 const TABLES: &[(u32, &str)] = &[(0x68d64ce7, include_str!("align_68d64ce7.txt"))];
 
-static SITES: LazyLock<HashMap<u32, Site>> = LazyLock::new(|| {
-  let stamp = CONFIG.offset_metadata.checksum;
+/// Версия формата кеша: меняется, когда меняется сам разбор.
+const CACHE_VERSION: &str = "align-scan v1";
+
+static SITES: OnceLock<HashMap<u32, Site>> = OnceLock::new();
+
+fn parse(text: &str) -> HashMap<u32, Site> {
   let mut map = HashMap::new();
-  let Some((_, text)) = TABLES.iter().find(|(s, _)| *s == stamp) else {
-    log::info!("align: no table for 0x{stamp:x}");
-    return map;
-  };
   for line in text.lines() {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
@@ -86,9 +87,71 @@ static SITES: LazyLock<HashMap<u32, Site>> = LazyLock::new(|| {
     };
     map.insert(rva, Site { kind, literal: parts[3] == "l" });
   }
-  log::info!("align: {} sites", map.len());
   map
-});
+}
+
+/// Таблица для текущей версии игры: из кеша, разбором exe или встроенная.
+fn load() -> HashMap<u32, Site> {
+  let stamp = CONFIG.offset_metadata.checksum;
+  let cache = format!("{PATH_AI_DIR}/align_{stamp:x}.txt");
+
+  if let Ok(text) = std::fs::read_to_string(&cache) {
+    if text.lines().next().is_some_and(|l| l.contains(CACHE_VERSION)) {
+      let map = parse(&text);
+      if !map.is_empty() {
+        log::info!("align: {} sites from {cache}", map.len());
+        return map;
+      }
+    }
+  }
+
+  // Разбор кода игры: при первом запуске каждой версии
+  let targets: Vec<u32> = CONFIG
+    .offset
+    .as_ref()
+    .map(|o| [o.addst, o.addst_top].into_iter().flatten().map(|v| v as u32).collect())
+    .unwrap_or_default();
+  if !targets.is_empty() {
+    let started = std::time::Instant::now();
+    match std::fs::read(PATH_EXE).ok().and_then(|data| crate::align_scan::scan(&data, &targets)) {
+      Some(sites) if !sites.is_empty() => {
+        let text = format!("# {CACHE_VERSION}\n{}", crate::align_scan::format(stamp, &sites));
+        let map = parse(&text);
+        log::info!("align: {} sites found in game code in {:?}", map.len(), started.elapsed());
+        if let Some((_, builtin)) = TABLES.iter().find(|(s, _)| *s == stamp) {
+          let same = parse(builtin).keys().collect::<std::collections::HashSet<_>>()
+            == map.keys().collect::<std::collections::HashSet<_>>();
+          log::info!("align: built-in table for this version {}", if same { "matches" } else { "differs" });
+        }
+        if let Err(err) = std::fs::write(&cache, text) {
+          log::warn!("align: unable to write {cache}: {err}");
+        }
+        return map;
+      }
+      _ => log::warn!("align: game code scan failed"),
+    }
+  }
+
+  match TABLES.iter().find(|(s, _)| *s == stamp) {
+    Some((_, text)) => {
+      let map = parse(text);
+      log::info!("align: {} sites from built-in table", map.len());
+      map
+    }
+    None => {
+      log::info!("align: no table for 0x{stamp:x}");
+      HashMap::new()
+    }
+  }
+}
+
+/// Таблица строится в отдельном потоке: разбор exe занимает доли секунды,
+/// но запуск игры ждать его не должен. До готовности выравнивания нет.
+pub fn start() {
+  std::thread::spawn(|| {
+    let _ = SITES.set(load());
+  });
+}
 
 /// Столбец, с которого игра начала бы надпись длиной len, относительно
 /// её «опорной» точки (центра или правого края).
@@ -137,13 +200,19 @@ fn caller(_target: usize) -> Option<u32> {
 /// русской. constructed — русскую надпись собрала сама игра (словарь
 /// интерфейса), а не перевод при выводе.
 pub fn shift(target: usize, en_len: usize, ru_len: usize, constructed: bool) -> i32 {
-  if ai::EXPERIMENTS.align_off || en_len == ru_len || SITES.is_empty() || target == 0 {
+  if ai::EXPERIMENTS.align_off || en_len == ru_len || target == 0 {
+    return 0;
+  }
+  let Some(sites) = SITES.get() else {
+    return 0;
+  };
+  if sites.is_empty() {
     return 0;
   }
   let Some(rva) = caller(target) else {
     return 0;
   };
-  let Some(site) = SITES.get(&rva) else {
+  let Some(site) = sites.get(&rva) else {
     return 0;
   };
   // Игра считала по длине уже русской строки — сдвигать нечего
@@ -164,6 +233,8 @@ pub static ADDST_TOP: LazyLock<usize> =
 /// интерфейса (тогда английская длина берётся из этого словаря).
 pub fn for_draw(target: usize, key: &[u8], translated: Option<&Vec<u8>>) -> i32 {
   match translated {
+    // Надпись сообщества уже подогнана под место его авторами
+    Some(_) if crate::dictionary::from_community(key) => 0,
     Some(t) => shift(target, key.len(), t.len().saturating_sub(1), false),
     None => match ai::ui_source_len(key) {
       Some(en) => shift(target, en, key.len(), true),

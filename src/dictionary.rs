@@ -72,12 +72,56 @@ impl Dictionary {
   }
 }
 
-/// Словарь сообщества в работе: везде, кроме режима оригинального текста.
-fn community(key: &[u8]) -> Option<Vec<u8>> {
-  if ai::EXPERIMENTS.english {
+/// Служебные слова: строка только из них — кусок фразы, а не надпись.
+const FUNCTION_WORDS: &[&[u8]] = &[
+  b"this", b"is", b"it", b"there", b"was", b"were", b"a", b"an", b"the", b"he", b"she", b"they", b"his", b"her",
+  b"their", b"its", b"of", b"in", b"on", b"at", b"to", b"and", b"or", b"by", b"with", b"from", b"for", b"as",
+];
+
+/// Надпись интерфейса, а не кусок, из которого игра собирает текст.
+///
+/// В режиме оригинального текста словарь сообщества при сборке строк
+/// подставляется только для надписей: строка начинается с заглавной
+/// латинской буквы (или с разметки цвета «[»), пробел на конце — только
+/// после двоеточия («Folder: »), и это не одни служебные слова («This
+/// is»). Не подставляется для кусков фраз (« was a legendary », «This
+/// must be the will of »), для слов языков, из которых игра склеивает
+/// имена («night», «void» → «Ночьюпустой»), и для «the», который
+/// словарь превращает в пробел. Из таких кусков игра собирает летопись,
+/// мысли и описания — их переводит нейросеть с английского целиком.
+fn interface_label(key: &[u8]) -> bool {
+  let Some(&first) = key.first() else {
+    return false;
+  };
+  if !(first.is_ascii_uppercase() || first == b'[') {
+    return false;
+  }
+  let trimmed = key.trim_ascii_end();
+  if trimmed.len() != key.len() && trimmed.last() != Some(&b':') {
+    return false;
+  }
+  let only_function_words = trimmed
+    .split(|&b| b == b' ')
+    .filter(|w| !w.is_empty())
+    .all(|w| FUNCTION_WORDS.iter().any(|f| w.eq_ignore_ascii_case(f)));
+  !only_function_words
+}
+
+/// Словарь сообщества. В режиме оригинального текста при сборке строк
+/// (construction) — только надписи интерфейса; при выводе на экран —
+/// любая строка целиком: она уже готова, и перевод ничего не склеит.
+fn community(key: &[u8], construction: bool) -> Option<Vec<u8>> {
+  if ai::EXPERIMENTS.english && construction && !interface_label(key) {
     return None;
   }
   DICTIONARY.get(key).cloned()
+}
+
+/// Перевод этой строки при выводе даст словарь сообщества. Его авторы
+/// сами подгоняли надписи под место (пробелы в начале для центровки),
+/// поэтому выравнивание (align.rs) такие надписи не сдвигает.
+pub fn from_community(key: &[u8]) -> bool {
+  DICTIONARY.get(key).is_some()
 }
 
 /// Поиск там, где игра копирует и склеивает строки: словарь сообщества,
@@ -87,7 +131,7 @@ fn community(key: &[u8]) -> Option<Vec<u8>> {
 /// В режиме оригинального текста словарь сообщества пропускается — игра
 /// собирает строки по-английски, и до экрана доходит настоящий текст.
 pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
-  if let Some(value) = community(key) {
+  if let Some(value) = community(key, true) {
     return Some(value);
   }
   // Режим оригинального текста: надписи интерфейса из нашего словаря
@@ -104,7 +148,7 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
 /// базовый. На экране перевод ничего в логике игры не меняет, поэтому
 /// здесь действуют и новые переводы, и ручные правки.
 pub fn lookup_all(key: &[u8]) -> Option<Vec<u8>> {
-  if let Some(value) = community(key) {
+  if let Some(value) = community(key, false) {
     return Some(value);
   }
   if let Some(value) = ai::lookup(key) {
