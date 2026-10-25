@@ -100,11 +100,16 @@ fn interface_label(key: &[u8]) -> bool {
   if trimmed.len() != key.len() && trimmed.last() != Some(&b':') {
     return false;
   }
-  let only_function_words = trimmed
-    .split(|&b| b == b' ')
-    .filter(|w| !w.is_empty())
-    .all(|w| FUNCTION_WORDS.iter().any(|f| w.eq_ignore_ascii_case(f)));
-  !only_function_words
+  let words: Vec<&[u8]> = trimmed.split(|&b| b == b' ').filter(|w| !w.is_empty()).collect();
+  let only_function_words = words.iter().all(|w| FUNCTION_WORDS.iter().any(|f| w.eq_ignore_ascii_case(f)));
+  if only_function_words {
+    return false;
+  }
+  // Предложение из трёх слов и больше — речь или описание («I've been
+  // rained on.»), а не надпись: его переводит нейросеть, с учётом пола
+  // дварфа и всей фразы. Словарь сообщества дал бы мужской род для всех
+  let sentence = matches!(trimmed.last(), Some(b'.' | b'!' | b'?' | b'"'));
+  !(sentence && words.len() >= 3)
 }
 
 /// Словарь сообщества. В режиме оригинального текста при сборке строк

@@ -272,11 +272,14 @@ fn female_context() -> bool {
     && now_ms().saturating_sub(GENDER_AT.load(Ordering::Relaxed)) <= GENDER_TTL_MS
 }
 
-/// Надпись, у которой может быть женская форма: короткая, без цифр,
-/// с буквами, не больше четырёх слов.
+/// Надпись, у которой может быть женская форма: без цифр, с буквами,
+/// не больше четырёх слов — или фраза в кавычках («"I've been rained
+/// on.  It's annoying."»): так в окне дварфа выводится его речь.
 fn gender_candidate(key: &[u8]) -> bool {
   let inner = trim_spaces(key);
-  if inner.len() < 3 || inner.len() > 60 || inner.iter().any(|b| b.is_ascii_digit()) {
+  let quote = inner.first() == Some(&b'"');
+  let limit = if quote { 200 } else { 60 };
+  if inner.len() < 3 || inner.len() > limit || inner.iter().any(|b| b.is_ascii_digit()) {
     return false;
   }
   if inner.contains(&0x0c) || inner.contains(&0x0b) {
@@ -284,7 +287,7 @@ fn gender_candidate(key: &[u8]) -> bool {
   }
   let letters = inner.iter().filter(|&&b| b.is_ascii_alphabetic() || b >= 0x80).count();
   let words = inner.split(|&b| b == b' ').filter(|w| !w.is_empty()).count();
-  letters >= 3 && words <= 4
+  letters >= 3 && (words <= 4 || (quote && words <= 30))
 }
 
 /// Обычный поиск с учётом пола: при видимом ♀ сначала женская форма.

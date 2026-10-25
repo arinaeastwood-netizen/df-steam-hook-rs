@@ -148,6 +148,12 @@ fn key_of(texts: &[Vec<u8>]) -> Vec<u8> {
   key
 }
 
+fn trim(text: &[u8]) -> &[u8] {
+  let start = text.iter().position(|&b| b != b' ').unwrap_or(text.len());
+  let end = text.iter().rposition(|&b| b != b' ').map_or(start, |e| e + 1);
+  &text[start..end]
+}
+
 fn latin_letters(text: &[u8]) -> usize {
   text.iter().filter(|b| b.is_ascii_alphabetic()).count()
 }
@@ -264,8 +270,12 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
     st.screen_right = edge;
   }
 
-  // Строка абзаца (кончается пробелом, в ней есть буквы) — не слово фразы
-  if key.last() == Some(&b' ') && key.iter().any(|b| b.is_ascii_alphabetic() || *b >= 0x80) {
+  // Строка абзаца (кончается пробелом, в ней есть буквы) — не слово фразы.
+  // В режиме оригинального текста слово летописи — одно слово: надпись
+  // из нескольких слов («Stray Yak Cow (Tame)», «Dense fescue grass») —
+  // это элемент интерфейса рядом с другими, а не часть фразы
+  let several_words = ai::EXPERIMENTS.english && trim(key).contains(&b' ');
+  if several_words || (key.last() == Some(&b' ') && key.iter().any(|b| b.is_ascii_alphabetic() || *b >= 0x80)) {
     st.active = None;
     finish(&mut st);
     return PLAIN;
@@ -299,9 +309,15 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
     st.shift_row = y;
   }
 
+  // Перенос на следующий ряд — только после ряда из нескольких слов:
+  // одиночные надписи столбиком («Nishgan / Tradeddish / Форпост»,
+  // «15th Granite / Early Spring / Year 5») — это поля интерфейса, а не
+  // фраза, перенесённая у края окна
   let continues = match st.learn.last() {
     Some(last) => {
-      (y == last.y && x == last.x + last.text.len() as i32 + 1) || (y == last.y + 1 && x == st.learn[0].x)
+      let row_words = st.learn.iter().filter(|t| t.y == last.y).count();
+      (y == last.y && x == last.x + last.text.len() as i32 + 1)
+        || (y == last.y + 1 && x == st.learn[0].x && row_words >= 2)
     }
     None => false,
   };
