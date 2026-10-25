@@ -103,6 +103,17 @@ static CORE_SIZE: AtomicUsize = AtomicUsize::new(0);
 /// ни имён мира, ни имён слов языков.
 static AI_UI: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 static UI_SIZE: AtomicUsize = AtomicUsize::new(0);
+/// Русская надпись словаря интерфейса → длина английского оригинала:
+/// для выравнивания надписей, которые игра собрала уже русскими (align.rs)
+static UI_SOURCE_LEN: LazyLock<RwLock<HashMap<Vec<u8>, usize>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Длина английского оригинала для русской надписи из словаря интерфейса.
+pub fn ui_source_len(drawn: &[u8]) -> Option<usize> {
+  if UI_SIZE.load(Ordering::Relaxed) == 0 {
+    return None;
+  }
+  UI_SOURCE_LEN.try_read().ok()?.get(drawn).copied()
+}
 
 /// Поиск надписи интерфейса для сборки строк (режим оригинального текста).
 pub fn lookup_ui(key: &[u8]) -> Option<Vec<u8>> {
@@ -124,6 +135,13 @@ fn load_ui() -> Option<SystemTime> {
   match Dictionary::load(PATH_AI_UI) {
     Ok(map) => {
       let size = map.len();
+      let reverse: HashMap<Vec<u8>, usize> = map
+        .iter()
+        .map(|(k, v)| (v[..v.len().saturating_sub(1)].to_vec(), k.len()))
+        .collect();
+      if let Ok(mut guard) = UI_SOURCE_LEN.write() {
+        *guard = reverse;
+      }
       if let Ok(mut guard) = AI_UI.write() {
         *guard = map;
         UI_SIZE.store(size, Ordering::Relaxed);
@@ -321,6 +339,8 @@ pub struct Experiments {
   pub english: bool,
   /// Аварийный выключатель обрезки надписей, которым не хватает места (fit.rs)
   pub fit_off: bool,
+  /// Аварийный выключатель выравнивания надписей по центру и краю (align.rs)
+  pub align_off: bool,
   pub screen_probe: bool,
 }
 
@@ -334,6 +354,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     flow_off: has("flow_off"),
     english: has("english"),
     fit_off: has("fit_off"),
+    align_off: has("align_off"),
     screen_probe: has("screen_probe"),
   }
 });

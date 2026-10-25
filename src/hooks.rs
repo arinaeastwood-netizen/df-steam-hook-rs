@@ -317,6 +317,11 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
     } else {
       dictionary::lookup_screen(gps, converted)
     };
+    // Надпись по центру или по правому краю: игра посчитала столбец по
+    // английской длине — сдвигаем на разницу (align.rs)
+    if !in_flow {
+      realign(gps, *crate::align::ADDST, converted, translated.as_ref());
+    }
     // Место для надписи: обрезка, если она налезает на соседа справа
     let translated = fitted(gps, converted, translated, in_flow);
     if shift != 0 {
@@ -338,6 +343,15 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
       }
       None => original!(gps, src, justify, space),
     }
+  }
+}
+
+/// Сдвиг курсора для надписи, которую игра выровняла по английской длине.
+fn realign(gps: usize, target: usize, key: &[u8], translated: Option<&Vec<u8>>) {
+  let dx = crate::align::for_draw(target, key, translated);
+  if dx != 0 {
+    let (x, y) = crate::ai::cursor(gps);
+    crate::ai::set_cursor(gps, x + dx, y);
   }
 }
 
@@ -369,7 +383,9 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
     match s.to_bytes_without_nul() {
       converted => match {
         crate::ai::probe(b'T', gps, converted);
-        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false)
+        let translated = dictionary::lookup_screen(gps, converted);
+        realign(gps, *crate::align::ADDST_TOP, converted, translated.as_ref());
+        fitted(gps, converted, translated, false)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
