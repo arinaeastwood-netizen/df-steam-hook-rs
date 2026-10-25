@@ -233,8 +233,9 @@ pub static ADDST_TOP: LazyLock<usize> =
 /// интерфейса (тогда английская длина берётся из этого словаря).
 pub fn for_draw(target: usize, key: &[u8], translated: Option<&Vec<u8>>) -> i32 {
   match translated {
-    // Надпись сообщества уже подогнана под место его авторами
-    Some(_) if crate::dictionary::from_community(key) => 0,
+    // Надпись сообщества с пробелами в начале — её авторы выровняли её
+    // сами («   Продолжить игру»); остальные выравниваются как обычно
+    Some(t) if crate::dictionary::from_community(key) && t.first() == Some(&b' ') => 0,
     Some(t) => shift(target, key.len(), t.len().saturating_sub(1), false),
     None => match ai::ui_source_len(key) {
       Some(en) => shift(target, en, key.len(), true),

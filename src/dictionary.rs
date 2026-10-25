@@ -109,6 +109,15 @@ fn interface_label(key: &[u8]) -> bool {
     return false;
   }
   let words: Vec<&[u8]> = trimmed.split(|&b| b == b' ').filter(|w| !w.is_empty()).collect();
+  // Одно слово с заглавной («Select», «Workshops», «Farming») — так игра
+  // собирает по слову окна обучения и летопись, и перевод сообщества при
+  // сборке вставлял в английскую фразу русские слова («Выбор Farmplot
+  // from the Build menu»). Отдельная надпись из одного слова («Settings»,
+  // «Items») переводится так же, только при выводе на экран. Исключение —
+  // подпись с двоеточием («Squad:»)
+  if words.len() == 1 && trimmed.last() != Some(&b':') {
+    return false;
+  }
   let only_function_words = words.iter().all(|w| FUNCTION_WORDS.iter().any(|f| w.eq_ignore_ascii_case(f)));
   if only_function_words {
     return false;
