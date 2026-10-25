@@ -181,11 +181,15 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool) -> Optio
     Some(len) => tracker.room(x, y, text.len()).filter(|&r| r >= len),
     None => None,
   };
-  let clip = clip_room(gps, x).filter(|&c| key.len() <= c && text.len() > c);
-  let room = match (neighbor, clip) {
-    (Some(a), Some(b)) => a.min(b),
-    (Some(a), None) => a,
-    (None, Some(b)) => b,
+  // Край рамки — настоящий край, даже если в него не помещается и
+  // английская надпись: колонка «Expert Miner» на странице «Труд» уже
+  // английского текста, и игра обрезает его тоже. Русскую надпись тогда
+  // нужно сделать короче рамки («Эксп. шахтёр»), а не обрубить на «Экспертный ш»
+  let clip = clip_room(gps, x).filter(|&c| text.len() > c);
+  let (room, by_clip) = match (neighbor, clip) {
+    (Some(a), Some(b)) if b <= a => (b, true),
+    (Some(a), _) => (a, false),
+    (None, Some(b)) => (b, true),
     (None, None) => return None,
   };
   if room < 2 || room >= text.len() {
@@ -204,7 +208,9 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool) -> Optio
     entry.0 += 1;
     entry.1 = gen;
     if entry.0 == REPORT_AFTER {
-      let mut payload = format!("{room}").into_bytes();
+      // «ширина,c» — по краю рамки (настоящее место, даже если английская
+      // надпись длиннее), «ширина,n» — до соседа справа
+      let mut payload = format!("{room},{}", if by_clip { 'c' } else { 'n' }).into_bytes();
       payload.push(0x1e);
       payload.extend_from_slice(report);
       drop(tracker);
