@@ -280,7 +280,7 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
     let s = CxxString::from_ptr(src);
     let converted = s.to_bytes_without_nul();
     crate::ai::probe(b'A', gps, converted);
-    draw_text(gps, src, converted, *crate::align::ADDST, &|p| original!(gps, p, justify, space));
+    draw_text(gps, src, converted, *crate::align::ADDST, space, &|p| original!(gps, p, justify, space));
   }
 }
 
@@ -289,7 +289,12 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
 /// рисует по слову (flow.rs), выравнивание (align.rs), место (fit.rs).
 /// draw — исходная функция игры с уже подставленными остальными
 /// аргументами.
-unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize, draw: &dyn Fn(*const u8)) {
+///
+/// space — последний аргумент addst: если он не ноль, игра сама сокращает
+/// надпись до space знаков (так рисуется колонка навыка на странице
+/// «Труд»: «Professional Miner» — ровно 18). Русская надпись длиннее
+/// обрезается игрой, и это место уходит в fit.rs.
+unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize, space: u32, draw: &dyn Fn(*const u8)) {
   unsafe {
     let plan = crate::flow::begin(gps, converted, 0);
     let (shift, quiet, in_flow) = match plan {
@@ -333,7 +338,7 @@ unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize,
       realign(gps, target, converted, translated.as_ref());
     }
     // Место для надписи: обрезка, если она налезает на соседа справа
-    let translated = fitted(gps, converted, translated, in_flow);
+    let translated = fitted(gps, converted, translated, in_flow, space);
     if shift != 0 {
       let (x, y) = crate::ai::cursor(gps);
       crate::ai::set_cursor(gps, x + shift, y);
@@ -370,9 +375,9 @@ fn realign(gps: usize, target: usize, key: &[u8], translated: Option<&Vec<u8>>) 
 /// Надпись с учётом места на экране (fit.rs): перевод или сама надпись,
 /// обрезанные за клетку до соседа справа. None — выводить как есть.
 /// Значение, как и в словаре, заканчивается нулём.
-fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool) -> Option<Vec<u8>> {
+fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool, space: u32) -> Option<Vec<u8>> {
   let drawn = translated.as_ref().map(|t| &t[..t.len().saturating_sub(1)]);
-  match crate::fit::settle(gps, key, drawn, in_flow) {
+  match crate::fit::settle(gps, key, drawn, in_flow, space) {
     Some(room) => {
       let text = drawn.unwrap_or(key);
       let mut cut = text[..room.min(text.len())].to_vec();
@@ -394,7 +399,7 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
     let s = CxxString::from_ptr(src);
     let converted = s.to_bytes_without_nul();
     crate::ai::probe(b'T', gps, converted);
-    draw_text(gps, src, converted, *crate::align::ADDST_TOP, &|p| original!(gps, p, justify, space));
+    draw_text(gps, src, converted, *crate::align::ADDST_TOP, space, &|p| original!(gps, p, justify, space));
   }
 }
 
@@ -408,7 +413,7 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
     match s.to_bytes_without_nul() {
       converted => match {
         crate::ai::probe(b'F', gps, converted);
-        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false)
+        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false, 0)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();

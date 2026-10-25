@@ -152,7 +152,7 @@ impl Tracker {
 /// на самом деле (перевод без завершающего нуля или None, если перевода
 /// нет). flow — слово фразы летописи: у неё своя раскладка.
 /// Возвращает, сколько байт надписи выводить, если её нужно обрезать.
-pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool) -> Option<usize> {
+pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u32) -> Option<usize> {
   if !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off || gps == 0 || blank(key) {
     return None;
   }
@@ -186,6 +186,12 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool) -> Optio
   // английского текста, и игра обрезает его тоже. Русскую надпись тогда
   // нужно сделать короче рамки («Эксп. шахтёр»), а не обрубить на «Экспертный ш»
   let clip = clip_room(gps, x).filter(|&c| text.len() > c);
+  // Игра сама сокращает надпись до space знаков — это тоже настоящая граница
+  let abbreviated = (space > 0 && text.len() > space as usize).then_some(space as usize);
+  let clip = match (clip, abbreviated) {
+    (Some(a), Some(b)) => Some(a.min(b)),
+    (a, b) => a.or(b),
+  };
   let (room, by_clip) = match (neighbor, clip) {
     (Some(a), Some(b)) if b <= a => (b, true),
     (Some(a), _) => (a, false),
