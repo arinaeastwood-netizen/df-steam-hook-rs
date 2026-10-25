@@ -22,3 +22,7 @@ pub const PATH_AI_EXPERIMENTS: &'static str = "./dfint-data/ai/experiments.txt";
 /// копировании строк. Они могли попасть в сохранения, поэтому заморожены
 /// и применяются там же, где раньше, — иначе старые сохранения не загрузятся
 pub const PATH_AI_CORE: &'static str = "./dfint-data/ai/dictionary_ai_core.csv";
+/// Надписи интерфейса для режима оригинального текста: применяются при
+/// сборке строк, как словарь сообщества, — игра раскладывает и
+/// центрирует их по русской длине.
+pub const PATH_AI_UI: &'static str = "./dfint-data/ai/dictionary_ai_ui.csv";

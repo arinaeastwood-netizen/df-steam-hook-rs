@@ -306,9 +306,9 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
         crate::ai::set_cursor(gps, x + len, y);
         return;
       }
-      crate::flow::Plan::Normal { shift, quiet } => (shift, quiet),
+      crate::flow::Plan::Normal { shift, quiet, flow } => (shift, quiet, flow),
     };
-    let (shift, quiet) = shift;
+    let (shift, quiet, in_flow) = shift;
 
     // Поиск перевода — до сдвига: сборка абзацев смотрит на позицию курсора.
     // Слово внутри фразы ищется без записи в журнал: его переведут фразой
@@ -317,6 +317,8 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
     } else {
       dictionary::lookup_screen(gps, converted)
     };
+    // Место для надписи: обрезка, если она налезает на соседа справа
+    let translated = fitted(gps, converted, translated, in_flow);
     if shift != 0 {
       let (x, y) = crate::ai::cursor(gps);
       crate::ai::set_cursor(gps, x + shift, y);
@@ -339,6 +341,26 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
   }
 }
 
+/// Надпись с учётом места на экране (fit.rs): перевод или сама надпись,
+/// обрезанные за клетку до соседа справа. None — выводить как есть.
+/// Значение, как и в словаре, заканчивается нулём.
+fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool) -> Option<Vec<u8>> {
+  let drawn = translated.as_ref().map(|t| &t[..t.len().saturating_sub(1)]);
+  match crate::fit::settle(gps, key, drawn, in_flow) {
+    Some(room) => {
+      let text = drawn.unwrap_or(key);
+      let mut cut = text[..room.min(text.len())].to_vec();
+      // Не оставлять пробел на конце обрезанной надписи
+      while cut.last() == Some(&b' ') {
+        cut.pop();
+      }
+      cut.push(0);
+      Some(cut)
+    }
+    None => translated,
+  }
+}
+
 #[cfg_attr(target_os = "windows", hook(by_offset))]
 #[cfg_attr(target_os = "linux", hook(by_symbol))]
 fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
@@ -347,7 +369,7 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
     match s.to_bytes_without_nul() {
       converted => match {
         crate::ai::probe(b'T', gps, converted);
-        dictionary::lookup_screen(gps, converted)
+        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
@@ -377,7 +399,7 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
     match s.to_bytes_without_nul() {
       converted => match {
         crate::ai::probe(b'F', gps, converted);
-        dictionary::lookup_screen(gps, converted)
+        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();

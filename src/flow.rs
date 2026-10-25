@@ -127,7 +127,9 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
 pub enum Plan {
   /// Вывести как обычно, сдвинув на shift столбцов. quiet — слово внутри
   /// фразы: перевод ищется, но в журнал как отдельная строка не идёт.
-  Normal { shift: i32, quiet: bool },
+  /// flow — слово фразы (продолжение или начало знакомой фразы): у неё
+  /// своя раскладка, обрезке надписей (fit.rs) она не подлежит.
+  Normal { shift: i32, quiet: bool, flow: bool },
   /// Вместо слова нарисовать эти куски перевода фразы (столбец, ряд, текст).
   /// Пустой список — слово не рисуется вовсе.
   Pieces(Vec<(i32, i32, Vec<u8>)>),
@@ -248,7 +250,7 @@ fn activate(st: &mut State, x: i32, y: i32, key: &[u8]) -> Option<Vec<(i32, i32,
 /// Слово перед выводом: решить, рисовать ли его как обычно или
 /// подменить кусками перевода фразы.
 pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
-  const PLAIN: Plan = Plan::Normal { shift: 0, quiet: false };
+  const PLAIN: Plan = Plan::Normal { shift: 0, quiet: false, flow: false };
   if ai::EXPERIMENTS.flow_off || gps == 0 || key.is_empty() || key.len() > MAX_TOKEN_LEN {
     return PLAIN;
   }
@@ -314,7 +316,7 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
       st.shift_row = y;
     }
     st.learn.push(Tok { text: key.to_vec(), x, y });
-    return Plan::Normal { shift: st.shift, quiet: quiet_word(key) };
+    return Plan::Normal { shift: st.shift, quiet: quiet_word(key), flow: true };
   }
 
   // С этого слова начинается новое: прежняя фраза закончилась
@@ -330,7 +332,7 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
   st.learn.push(Tok { text: key.to_vec(), x, y });
   st.shift = 0;
   st.shift_row = y;
-  Plan::Normal { shift: 0, quiet: known && quiet_word(key) }
+  Plan::Normal { shift: 0, quiet: known && quiet_word(key), flow: known }
 }
 
 /// Слово фразы, которое не нужно переводить отдельно: в режиме

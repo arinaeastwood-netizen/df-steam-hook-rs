@@ -50,7 +50,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{LazyLock, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
-use crate::constants::{PATH_AI_CORE, PATH_AI_DICTIONARY, PATH_AI_DIR, PATH_AI_EXPERIMENTS, PATH_AI_MISSES};
+use crate::constants::{PATH_AI_CORE, PATH_AI_DICTIONARY, PATH_AI_DIR, PATH_AI_EXPERIMENTS, PATH_AI_MISSES, PATH_AI_UI};
 use crate::dictionary::Dictionary;
 
 /// Минимальная длина строки, которую имеет смысл переводить.
@@ -95,6 +95,46 @@ static AI_DICTIONARY: LazyLock<RwLock<HashMap<Vec<u8>, AiEntry>>> = LazyLock::ne
 /// и свои собственные, и сохранение загружается.
 static AI_CORE: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 static CORE_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+/// Надписи интерфейса (dictionary_ai_ui.csv) — только в режиме
+/// оригинального текста. Применяются там, где игра собирает строки,
+/// вместо словаря сообщества: кнопки центрируются по русской длине.
+/// Приложение кладёт сюда лишь надписи из обычных английских слов —
+/// ни имён мира, ни имён слов языков.
+static AI_UI: LazyLock<RwLock<HashMap<Vec<u8>, Vec<u8>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+static UI_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+/// Поиск надписи интерфейса для сборки строк (режим оригинального текста).
+pub fn lookup_ui(key: &[u8]) -> Option<Vec<u8>> {
+  if UI_SIZE.load(Ordering::Relaxed) == 0 || is_word_key(key) {
+    return None;
+  }
+  AI_UI.try_read().ok()?.get(key).cloned()
+}
+
+fn load_ui() -> Option<SystemTime> {
+  let stamp = modified_at(PATH_AI_UI);
+  if stamp.is_none() {
+    if let Ok(mut guard) = AI_UI.write() {
+      guard.clear();
+      UI_SIZE.store(0, Ordering::Relaxed);
+    }
+    return None;
+  }
+  match Dictionary::load(PATH_AI_UI) {
+    Ok(map) => {
+      let size = map.len();
+      if let Ok(mut guard) = AI_UI.write() {
+        *guard = map;
+        UI_SIZE.store(size, Ordering::Relaxed);
+        log::info!("ai: interface dictionary loaded, items {size}");
+      }
+      stamp
+    }
+    // Файл мог быть занят записью — повторим на следующем круге
+    Err(_) => None,
+  }
+}
 
 /// Поиск в базовом словаре. Блокировка берётся с ожиданием, а не через
 /// try_lock: здесь пропуск перевода означал бы несовпадение имён, а
@@ -279,6 +319,8 @@ pub struct Experiments {
   /// (имена, летопись, интерфейс), его переводит SkadDF. Базовый
   /// замороженный словарь остаётся: он нужен старым сохранениям.
   pub english: bool,
+  /// Аварийный выключатель обрезки надписей, которым не хватает места (fit.rs)
+  pub fit_off: bool,
   pub screen_probe: bool,
 }
 
@@ -291,6 +333,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     colored_off: has("colored_off"),
     flow_off: has("flow_off"),
     english: has("english"),
+    fit_off: has("fit_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -422,7 +465,10 @@ pub fn is_word_key(key: &[u8]) -> bool {
 
 /// Поиск во втором (нейросетевом) словаре. Имена слов пропускаются.
 pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
-  if AI_SIZE.load(Ordering::Relaxed) == 0 || is_word_key(key) {
+  // Имя слова языка — только при сборке строк. Здесь поиск для вывода на
+  // экран: в режиме оригинального текста «dolomite» переводится как
+  // любая надпись — на данные игры вывод не влияет
+  if AI_SIZE.load(Ordering::Relaxed) == 0 || (!EXPERIMENTS.english && is_word_key(key)) {
     return None;
   }
   let map = AI_DICTIONARY.try_read().ok()?;
@@ -797,7 +843,12 @@ pub(crate) fn send_entry(kind: u8, payload: Vec<u8>) -> bool {
 /// Регистрация строки без перевода. Имена слов не записываются:
 /// их нельзя переводить нейросетью (см. is_word_key).
 pub fn report_miss(key: &[u8]) {
-  if !worth_logging(key) || is_word_key(key) {
+  if !worth_logging(key) || (!EXPERIMENTS.english && is_word_key(key)) {
+    return;
+  }
+  // В режиме оригинального текста русская строка без латиницы — это уже
+  // наш перевод (надпись, собранная игрой из словаря интерфейса)
+  if EXPERIMENTS.english && !key.iter().any(|b| b.is_ascii_alphabetic()) {
     return;
   }
   send_entry(b'S', key.to_vec());
@@ -942,7 +993,15 @@ fn start_reloader(core_stamp: Option<SystemTime>) {
   std::thread::spawn(move || {
     let mut last: Option<SystemTime> = None;
     let mut last_core = core_stamp;
+    let mut last_ui: Option<SystemTime> = None;
     loop {
+      if EXPERIMENTS.english {
+        let ui_now = modified_at(PATH_AI_UI);
+        if ui_now != last_ui {
+          last_ui = load_ui();
+        }
+      }
+
       // Базовый словарь меняется редко — только когда приложение
       // замораживает в нём новые значения
       let core_now = modified_at(PATH_AI_CORE);

@@ -90,6 +90,13 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
   if let Some(value) = community(key) {
     return Some(value);
   }
+  // Режим оригинального текста: надписи интерфейса из нашего словаря
+  // подставляются при сборке строк, как раньше словарь сообщества
+  if ai::EXPERIMENTS.english {
+    if let Some(value) = ai::lookup_ui(key) {
+      return Some(value);
+    }
+  }
   ai::lookup_core(key)
 }
 

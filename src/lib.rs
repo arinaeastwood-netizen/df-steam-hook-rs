@@ -10,6 +10,7 @@ mod constants;
 mod cxxstring;
 mod dictionary;
 mod encoding;
+mod fit;
 mod flow;
 mod hooks;
 mod utils;
