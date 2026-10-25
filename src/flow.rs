@@ -28,7 +28,8 @@
 //! хотя бы не налезают на соседей.
 //!
 //! Формат записи журнала L: ширина, затем слова через 0x1F:
-//!   «x0,y0,ширина,экран» 0x1F «dx,dy» 0x1E слово 0x1F «dx,dy» 0x1E слово …
+//!   «x0,y0,ширина,экран» 0x1F «dx,dy,цвет» 0x1E слово 0x1F … (цвет —
+//!   ai::color_sig: выделенные слова отличаются от основного цвета)
 //! dx, dy — место слова относительно первого; ширина — самый правый край
 //! фраз с того же края экрана, относительно x0; экран — самый правый
 //! край всего, что выводилось через addst за сеанс (ширина экрана в
@@ -70,6 +71,9 @@ struct Tok {
   text: Vec<u8>,
   x: i32,
   y: i32,
+  /// Цвет слова (ai::color_sig): по нему SkadDF знает, какие слова
+  /// выделены, и ставит вокруг них скобки
+  color: u32,
 }
 
 /// Фраза, увиденная на прошлом кадре: слова и их места от первого слова.
@@ -219,7 +223,7 @@ fn finish(st: &mut State) {
     let mut payload = format!("{x0},{y0},{width},{screen}").into_bytes();
     for (t, (dx, dy)) in toks.iter().zip(rel.iter()) {
       payload.push(SEP);
-      payload.extend_from_slice(format!("{dx},{dy}").as_bytes());
+      payload.extend_from_slice(format!("{dx},{dy},{}", t.color).as_bytes());
       payload.push(POS_SEP);
       payload.extend_from_slice(&t.text);
     }
@@ -303,6 +307,7 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
         text: active.texts[k].clone(),
         x: active.x0 + active.rel[k].0,
         y: active.y0 + active.rel[k].1,
+        color: 0,
       })
       .collect();
     st.shift = 0;
@@ -335,7 +340,7 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
       st.shift = 0;
       st.shift_row = y;
     }
-    st.learn.push(Tok { text: key.to_vec(), x, y });
+    st.learn.push(Tok { text: key.to_vec(), x, y, color: ai::color_sig(gps) });
     return Plan::Normal { shift: st.shift, quiet: quiet_word(key), flow: true };
   }
 
@@ -349,7 +354,7 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
   // Начало фразы, которая уже знакома по прошлым кадрам, но ещё не
   // переведена: первое слово тоже не отдельная строка
   let known = st.known.contains_key(&(x, y, key.to_vec()));
-  st.learn.push(Tok { text: key.to_vec(), x, y });
+  st.learn.push(Tok { text: key.to_vec(), x, y, color: ai::color_sig(gps) });
   st.shift = 0;
   st.shift_row = y;
   Plan::Normal { shift: 0, quiet: known && quiet_word(key), flow: known }

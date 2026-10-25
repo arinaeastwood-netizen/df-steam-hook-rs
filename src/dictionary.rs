@@ -73,9 +73,17 @@ impl Dictionary {
 }
 
 /// Служебные слова: строка только из них — кусок фразы, а не надпись.
+/// Сюда же — слова, с которых игра начинает предложения связного текста
+/// («You can…», «All available…», «Here…»): одно такое слово с заглавной
+/// — начало фразы, а не надпись. Заменённое при сборке строки на
+/// «Вы» / «Все», оно сбивает раскладку слов, и фраза рвётся.
 const FUNCTION_WORDS: &[&[u8]] = &[
   b"this", b"is", b"it", b"there", b"was", b"were", b"a", b"an", b"the", b"he", b"she", b"they", b"his", b"her",
   b"their", b"its", b"of", b"in", b"on", b"at", b"to", b"and", b"or", b"by", b"with", b"from", b"for", b"as",
+  b"you", b"your", b"all", b"some", b"any", b"each", b"every", b"these", b"those", b"that", b"we", b"our", b"i",
+  b"my", b"here", b"when", b"if", b"so", b"then", b"also", b"but", b"can", b"will", b"may", b"must", b"should",
+  b"would", b"could", b"are", b"be", b"has", b"have", b"had", b"do", b"does", b"such", b"which", b"who", b"what",
+  b"where", b"once", b"only", b"many", b"most", b"more",
 ];
 
 /// Надпись интерфейса, а не кусок, из которого игра собирает текст.
