@@ -280,8 +280,19 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
     let s = CxxString::from_ptr(src);
     let converted = s.to_bytes_without_nul();
     crate::ai::probe(b'A', gps, converted);
+    draw_text(gps, src, converted, *crate::align::ADDST, &|p| original!(gps, p, justify, space));
+  }
+}
 
-    let shift = match crate::flow::begin(gps, converted, justify) {
+/// Вывод надписи через addst или addst_top (верхний слой: окна обучения,
+/// подсказки поверх карты). Одинаково для обоих: фразы, которые игра
+/// рисует по слову (flow.rs), выравнивание (align.rs), место (fit.rs).
+/// draw — исходная функция игры с уже подставленными остальными
+/// аргументами.
+unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize, draw: &dyn Fn(*const u8)) {
+  unsafe {
+    let plan = crate::flow::begin(gps, converted, 0);
+    let (shift, quiet, in_flow) = match plan {
       crate::flow::Plan::Pieces(pieces) => {
         // Куски перевода фразы — каждый в свою клетку. Буфер живёт до
         // конца вызова: игра копирует текст на экран и указатель не хранит.
@@ -300,7 +311,7 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
             }
           }
           crate::ai::set_cursor(gps, px, py);
-          original!(gps, cxxstr.as_ptr(), justify, space);
+          draw(cxxstr.as_ptr());
         }
         // Курсор — как после вывода самого слова
         crate::ai::set_cursor(gps, x + len, y);
@@ -308,7 +319,6 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
       }
       crate::flow::Plan::Normal { shift, quiet, flow } => (shift, quiet, flow),
     };
-    let (shift, quiet, in_flow) = shift;
 
     // Поиск перевода — до сдвига: сборка абзацев смотрит на позицию курсора.
     // Слово внутри фразы ищется без записи в журнал: его переведут фразой
@@ -320,7 +330,7 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
     // Надпись по центру или по правому краю: игра посчитала столбец по
     // английской длине — сдвигаем на разницу (align.rs)
     if !in_flow {
-      realign(gps, *crate::align::ADDST, converted, translated.as_ref());
+      realign(gps, target, converted, translated.as_ref());
     }
     // Место для надписи: обрезка, если она налезает на соседа справа
     let translated = fitted(gps, converted, translated, in_flow);
@@ -331,17 +341,19 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
     match translated {
       Some(translate) => {
         crate::flow::drawn(converted.len(), translate.len().saturating_sub(1));
-        let (ptr, len, _) = translate.to_owned().into_raw_parts();
-        let mut cxxstr = CxxString::new(ptr, len - 1);
+        let n = translate.len().saturating_sub(1);
+        let mut buf = translate;
+        buf.resize(n.max(16) + 1, 0);
+        let mut cxxstr = CxxString::new(buf.as_mut_ptr(), n);
         #[cfg(target_os = "linux")]
         {
           if cxxstr.len < 16 {
             cxxstr.ptr = cxxstr.sso.buf.as_mut_ptr();
           }
         }
-        original!(gps, cxxstr.as_ptr(), justify, space)
+        draw(cxxstr.as_ptr())
       }
-      None => original!(gps, src, justify, space),
+      None => draw(src),
     }
   }
 }
@@ -380,28 +392,9 @@ fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool) ->
 fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
-    match s.to_bytes_without_nul() {
-      converted => match {
-        crate::ai::probe(b'T', gps, converted);
-        let translated = dictionary::lookup_screen(gps, converted);
-        realign(gps, *crate::align::ADDST_TOP, converted, translated.as_ref());
-        fitted(gps, converted, translated, false)
-      } {
-        Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
-          let mut cxxstr = CxxString::new(ptr, len - 1);
-          #[cfg(target_os = "linux")]
-          {
-            if cxxstr.len < 16 {
-              cxxstr.ptr = cxxstr.sso.buf.as_mut_ptr();
-            }
-          }
-          original!(gps, cxxstr.as_ptr(), justify, space)
-        }
-        _ => original!(gps, src, justify, space),
-      },
-      _ => original!(gps, src, justify, space),
-    }
+    let converted = s.to_bytes_without_nul();
+    crate::ai::probe(b'T', gps, converted);
+    draw_text(gps, src, converted, *crate::align::ADDST_TOP, &|p| original!(gps, p, justify, space));
   }
 }
 

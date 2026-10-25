@@ -116,8 +116,17 @@ fn interface_label(key: &[u8]) -> bool {
 /// (construction) — только надписи интерфейса; при выводе на экран —
 /// любая строка целиком: она уже готова, и перевод ничего не склеит.
 fn community(key: &[u8], construction: bool) -> Option<Vec<u8>> {
-  if ai::EXPERIMENTS.english && construction && !interface_label(key) {
-    return None;
+  if ai::EXPERIMENTS.english {
+    if construction && !interface_label(key) {
+      return None;
+    }
+    // При выводе — не отдельное слово строчными: так игра рисует по слову
+    // связный текст (окна обучения, летопись), и пословный перевод
+    // сообщества даёт кашу «вас назначить где ваш жители». Такие слова
+    // ждут перевода всей фразы
+    if !construction && !key.contains(&b' ') && key.first().is_some_and(|b| b.is_ascii_lowercase()) {
+      return None;
+    }
   }
   DICTIONARY.get(key).cloned()
 }
