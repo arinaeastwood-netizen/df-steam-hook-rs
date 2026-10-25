@@ -516,7 +516,11 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
     return None;
   }
   let map = AI_DICTIONARY.try_read().ok()?;
-  let entry = map.get(key)?;
+  let Some(entry) = map.get(key) else {
+    // Надпись с числом («Elevation 34»): перевод по шаблону, общему для
+    // всех чисел, — без новой строки в журнале на каждое значение
+    return by_template(&map, key);
+  };
   let value = entry.value.clone();
 
   // Первое использование перевода после загрузки словаря — сообщаем
@@ -526,6 +530,63 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
     send_entry(b'U', key.to_vec());
   }
   Some(value)
+}
+
+// ==================== НАДПИСИ С ЧИСЛАМИ ====================
+//
+// «Elevation 33», «Elevation 34»… — для игры это разные строки, и каждая
+// раньше уходила на перевод отдельно. Приложение кладёт в словарь
+// шаблон: ключ — 0x1A и надпись, где каждое число заменено байтом 0x1A;
+// значение — перевод, где на месте чисел стоят метки 0x1A и номер числа
+// ('0'…'9'). Хук подставляет числа надписи в метки по номерам.
+// Шаблоны делаются только там, где число стоит отдельно и после него нет
+// слова: «5 сохранений» / «1 сохранение» по шаблону не склонить.
+
+const NUMBER_MARK: u8 = 0x1a;
+
+fn template_key(key: &[u8]) -> Option<(Vec<u8>, Vec<&[u8]>)> {
+  if !key.iter().any(|b| b.is_ascii_digit()) {
+    return None;
+  }
+  let mut out = vec![NUMBER_MARK];
+  let mut numbers = Vec::new();
+  let mut i = 0;
+  while i < key.len() {
+    if key[i].is_ascii_digit() {
+      let start = i;
+      while i < key.len() && key[i].is_ascii_digit() {
+        i += 1;
+      }
+      numbers.push(&key[start..i]);
+      out.push(NUMBER_MARK);
+    } else {
+      out.push(key[i]);
+      i += 1;
+    }
+  }
+  if numbers.len() > 10 {
+    return None;
+  }
+  Some((out, numbers))
+}
+
+fn by_template(map: &HashMap<Vec<u8>, AiEntry>, key: &[u8]) -> Option<Vec<u8>> {
+  let (tkey, numbers) = template_key(key)?;
+  let entry = map.get(&tkey)?;
+  let value = &entry.value;
+  let mut out = Vec::with_capacity(value.len() + 8);
+  let mut i = 0;
+  while i < value.len() {
+    if value[i] == NUMBER_MARK && i + 1 < value.len() && value[i + 1].is_ascii_digit() {
+      let n = (value[i + 1] - b'0') as usize;
+      out.extend_from_slice(numbers.get(n)?);
+      i += 2;
+    } else {
+      out.push(value[i]);
+      i += 1;
+    }
+  }
+  Some(out)
 }
 
 /// Строка, после которой абзац продолжается: заканчивается пробелом
