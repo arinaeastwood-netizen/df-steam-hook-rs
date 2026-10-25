@@ -413,7 +413,7 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
         // Четвёртый аргумент addst_flag — как space у addst: игра сама
         // сокращает надпись до этого числа знаков (0xa9943c), так рисуется
         // колонка навыка на странице «Труд»
-        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false, a4 as u32, true)
+        fitted(gps, converted, dictionary::lookup_screen(gps, converted), false, a4 as u32, false)
       } {
         Some(translate) => {
           let (ptr, len, _) = translate.to_owned().into_raw_parts();
