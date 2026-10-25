@@ -28,9 +28,20 @@
 //! хотя бы не налезают на соседей.
 //!
 //! Формат записи журнала L: ширина, затем слова через 0x1F:
-//!   «x0,y0,ширина» 0x1F «dx,dy» 0x1E слово 0x1F «dx,dy» 0x1E слово …
+//!   «x0,y0,ширина,экран» 0x1F «dx,dy» 0x1E слово 0x1F «dx,dy» 0x1E слово …
 //! dx, dy — место слова относительно первого; ширина — самый правый край
-//! фраз с того же края экрана, относительно x0.
+//! фраз с того же края экрана, относительно x0; экран — самый правый
+//! край всего, что выводилось через addst за сеанс (ширина экрана в
+//! клетках: игра не всегда заполняет её фразами).
+//!
+//! Строка, которая кончается пробелом, — строка абзаца, нарезанного
+//! игрой (подсказки, описания в меню): у неё своя сборка (ai::screen),
+//! фразой она не считается.
+//!
+//! В режиме оригинального текста (experiments.txt: english) все слова
+//! летописи английские, и каждое отдельно не переводится: слова фразы,
+//! кроме слов с заглавной (имён), не попадают в журнал как отдельные
+//! строки. Имена попадают — их SkadDF переводит раньше фразы.
 //!
 //! Ключ словаря: 0x19 и слова фразы через 0x1F. Значение — куски через
 //! 0x1F, каждый «номер слова,ряд,столбец» 0x1E текст; ряд и столбец —
@@ -94,6 +105,8 @@ struct State {
   known: HashMap<(i32, i32, Vec<u8>), Known>,
   /// Самый правый край фраз по столбцу их начала
   right: HashMap<i32, i32>,
+  /// Самый правый край всего выведенного: ширина экрана
+  screen_right: i32,
   logged: bool,
 }
 
@@ -105,14 +118,16 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
     active: None,
     known: HashMap::new(),
     right: HashMap::new(),
+    screen_right: 0,
     logged: false,
   })
 });
 
 /// Что делать с выводом слова.
 pub enum Plan {
-  /// Вывести как обычно (с обычным поиском перевода), сдвинув на shift столбцов.
-  Normal { shift: i32 },
+  /// Вывести как обычно, сдвинув на shift столбцов. quiet — слово внутри
+  /// фразы: перевод ищется, но в журнал как отдельная строка не идёт.
+  Normal { shift: i32, quiet: bool },
   /// Вместо слова нарисовать эти куски перевода фразы (столбец, ряд, текст).
   /// Пустой список — слово не рисуется вовсе.
   Pieces(Vec<(i32, i32, Vec<u8>)>),
@@ -186,13 +201,14 @@ fn finish(st: &mut State) {
     *right = edge;
   }
   let width = *right - x0;
+  let screen = st.screen_right;
 
   let texts: Vec<Vec<u8>> = toks.iter().map(|t| t.text.clone()).collect();
   let rel: Vec<(i32, i32)> = toks.iter().map(|t| (t.x - x0, t.y - y0)).collect();
 
   let worth = toks.len() >= MIN_JOURNAL_TOKENS && toks.iter().any(|t| latin_letters(&t.text) >= 2);
   if worth && ai::lookup(&key_of(&texts)).is_none() {
-    let mut payload = format!("{x0},{y0},{width}").into_bytes();
+    let mut payload = format!("{x0},{y0},{width},{screen}").into_bytes();
     for (t, (dx, dy)) in toks.iter().zip(rel.iter()) {
       payload.push(SEP);
       payload.extend_from_slice(format!("{dx},{dy}").as_bytes());
@@ -232,14 +248,26 @@ fn activate(st: &mut State, x: i32, y: i32, key: &[u8]) -> Option<Vec<(i32, i32,
 /// Слово перед выводом: решить, рисовать ли его как обычно или
 /// подменить кусками перевода фразы.
 pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
+  const PLAIN: Plan = Plan::Normal { shift: 0, quiet: false };
   if ai::EXPERIMENTS.flow_off || gps == 0 || key.is_empty() || key.len() > MAX_TOKEN_LEN {
-    return Plan::Normal { shift: 0 };
+    return PLAIN;
   }
   let (x, y) = ai::cursor(gps);
   let mut st = match STATE.try_lock() {
     Ok(st) => st,
-    Err(_) => return Plan::Normal { shift: 0 },
+    Err(_) => return PLAIN,
   };
+  let edge = x + key.len() as i32;
+  if edge > st.screen_right && edge < 2000 {
+    st.screen_right = edge;
+  }
+
+  // Строка абзаца (кончается пробелом, в ней есть буквы) — не слово фразы
+  if key.last() == Some(&b' ') && key.iter().any(|b| b.is_ascii_alphabetic() || *b >= 0x80) {
+    st.active = None;
+    finish(&mut st);
+    return PLAIN;
+  }
 
   // Идёт подмена фразы: слово должно быть следующим словом этой фразы
   if let Some(active) = st.active.as_mut() {
@@ -286,7 +314,7 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
       st.shift_row = y;
     }
     st.learn.push(Tok { text: key.to_vec(), x, y });
-    return Plan::Normal { shift: st.shift };
+    return Plan::Normal { shift: st.shift, quiet: quiet_word(key) };
   }
 
   // С этого слова начинается новое: прежняя фраза закончилась
@@ -296,10 +324,19 @@ pub fn begin(gps: usize, key: &[u8], justify: u8) -> Plan {
     return Plan::Pieces(pieces);
   }
 
+  // Начало фразы, которая уже знакома по прошлым кадрам, но ещё не
+  // переведена: первое слово тоже не отдельная строка
+  let known = st.known.contains_key(&(x, y, key.to_vec()));
   st.learn.push(Tok { text: key.to_vec(), x, y });
   st.shift = 0;
   st.shift_row = y;
-  Plan::Normal { shift: 0 }
+  Plan::Normal { shift: 0, quiet: known && quiet_word(key) }
+}
+
+/// Слово фразы, которое не нужно переводить отдельно: в режиме
+/// оригинального текста — всё, кроме слов с заглавной (это имена).
+fn quiet_word(key: &[u8]) -> bool {
+  ai::EXPERIMENTS.english && !key.first().is_some_and(|b| b.is_ascii_uppercase())
 }
 
 /// Слово выведено обычным путём: перевод мог изменить его длину, и

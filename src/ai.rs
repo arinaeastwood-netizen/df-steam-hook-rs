@@ -274,6 +274,11 @@ pub struct Experiments {
   pub colored_off: bool,
   /// Аварийный выключатель перевода фраз, которые игра рисует по слову (flow.rs)
   pub flow_off: bool,
+  /// Оригинальный текст: словарь сообщества не подставляется нигде — ни
+  /// при сборке строк, ни при выводе. Игра выводит английский текст
+  /// (имена, летопись, интерфейс), его переводит SkadDF. Базовый
+  /// замороженный словарь остаётся: он нужен старым сохранениям.
+  pub english: bool,
   pub screen_probe: bool,
 }
 
@@ -285,6 +290,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     cstr_plus_off: has("cstr_plus_off"),
     colored_off: has("colored_off"),
     flow_off: has("flow_off"),
+    english: has("english"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -387,11 +393,12 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.colored_off,
     EXPERIMENTS.flow_off,
+    EXPERIMENTS.english,
     EXPERIMENTS.screen_probe
   );
 }

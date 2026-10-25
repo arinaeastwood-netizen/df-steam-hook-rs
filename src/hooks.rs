@@ -306,11 +306,17 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
         crate::ai::set_cursor(gps, x + len, y);
         return;
       }
-      crate::flow::Plan::Normal { shift } => shift,
+      crate::flow::Plan::Normal { shift, quiet } => (shift, quiet),
     };
+    let (shift, quiet) = shift;
 
-    // Поиск перевода — до сдвига: сборка абзацев смотрит на позицию курсора
-    let translated = dictionary::lookup_screen(gps, converted);
+    // Поиск перевода — до сдвига: сборка абзацев смотрит на позицию курсора.
+    // Слово внутри фразы ищется без записи в журнал: его переведут фразой
+    let translated = if quiet {
+      dictionary::lookup_all(converted)
+    } else {
+      dictionary::lookup_screen(gps, converted)
+    };
     if shift != 0 {
       let (x, y) = crate::ai::cursor(gps);
       crate::ai::set_cursor(gps, x + shift, y);

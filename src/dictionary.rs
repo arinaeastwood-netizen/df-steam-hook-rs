@@ -72,13 +72,23 @@ impl Dictionary {
   }
 }
 
+/// Словарь сообщества в работе: везде, кроме режима оригинального текста.
+fn community(key: &[u8]) -> Option<Vec<u8>> {
+  if ai::EXPERIMENTS.english {
+    return None;
+  }
+  DICTIONARY.get(key).cloned()
+}
+
 /// Поиск там, где игра копирует и склеивает строки: словарь сообщества,
 /// затем базовый (замороженный) нейросетевой словарь. Новые переводы
 /// нейросети здесь не применяются: строка может быть не только текстом
 /// на экране, но и именем, которое игра запишет в сохранение.
+/// В режиме оригинального текста словарь сообщества пропускается — игра
+/// собирает строки по-английски, и до экрана доходит настоящий текст.
 pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
-  if let Some(value) = DICTIONARY.get(key) {
-    return Some(value.clone());
+  if let Some(value) = community(key) {
+    return Some(value);
   }
   ai::lookup_core(key)
 }
@@ -87,8 +97,8 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
 /// базовый. На экране перевод ничего в логике игры не меняет, поэтому
 /// здесь действуют и новые переводы, и ручные правки.
 pub fn lookup_all(key: &[u8]) -> Option<Vec<u8>> {
-  if let Some(value) = DICTIONARY.get(key) {
-    return Some(value.clone());
+  if let Some(value) = community(key) {
+    return Some(value);
   }
   if let Some(value) = ai::lookup(key) {
     return Some(value);
