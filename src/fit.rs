@@ -225,3 +225,100 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u
   }
   Some(room)
 }
+
+// ==================== СОКРАЩЕНИЕ НАДПИСИ ====================
+//
+// Если надпись не помещается, хук сокращает её сам и сразу, в том же
+// кадре, а не обрезает по краю: «Профессиональный шахтёр» в колонке на
+// 21 знак → «Проф. шахтёр», а не «Профессиональный шахт». Так делают в
+// интерфейсах: самое длинное слово сокращается до согласной и получает
+// точку, пока надпись не поместится. Обрезка по краю — только если
+// сократить словами не получилось. Нейросеть потом всё равно получает
+// место (запись W) и может предложить вариант красивее.
+
+/// Гласные в кодировке игры: по таблице кодировки dfint, а без неё —
+/// по cp866, в которой работает русский перевод.
+fn vowel_table() -> [bool; 256] {
+  let mut table = [false; 256];
+  for c in "aeiouyAEIOUY".bytes() {
+    table[c as usize] = true;
+  }
+  let utf = &crate::config::CONFIG.encoding.utf;
+  for c in "аеёиоуыэюяАЕЁИОУЫЭЮЯ".chars() {
+    match utf.get(&(c as u32)) {
+      Some(&b) => table[b as usize] = true,
+      None => {
+        if let Some(b) = cp866(c) {
+          table[b as usize] = true;
+        }
+      }
+    }
+  }
+  table
+}
+
+fn cp866(c: char) -> Option<u8> {
+  let u = c as u32;
+  match u {
+    0x410..=0x42f => Some((u - 0x410 + 0x80) as u8),
+    0x430..=0x43f => Some((u - 0x430 + 0xa0) as u8),
+    0x440..=0x44f => Some((u - 0x440 + 0xe0) as u8),
+    0x401 => Some(0xf0),
+    0x451 => Some(0xf1),
+    _ => None,
+  }
+}
+
+static VOWELS: LazyLock<[bool; 256]> = LazyLock::new(vowel_table);
+
+pub fn abbreviate(text: &[u8], room: usize) -> Vec<u8> {
+  shorten(text, room, &VOWELS)
+}
+
+fn is_letter(b: u8) -> bool {
+  b.is_ascii_alphabetic() || b >= 0x80
+}
+
+/// Сокращение надписи до room знаков (однобайтовая кодировка игры).
+pub fn shorten(text: &[u8], room: usize, vowels: &[bool; 256]) -> Vec<u8> {
+  let mut words: Vec<Vec<u8>> = text.split(|&b| b == b' ').map(|w| w.to_vec()).collect();
+  let join = |w: &Vec<Vec<u8>>| w.join(&b' ');
+  let mut done = vec![false; words.len()];
+  while join(&words).len() > room {
+    // Самое длинное несокращённое слово из шести букв и больше
+    let mut at: Option<usize> = None;
+    for (i, w) in words.iter().enumerate() {
+      let letters = w.iter().filter(|&&b| is_letter(b)).count();
+      if done[i] || letters < 6 || w.last() == Some(&b'.') {
+        continue;
+      }
+      let best = at.map(|j| words[j].iter().filter(|&&b| is_letter(b)).count()).unwrap_or(0);
+      if letters > best {
+        at = Some(i);
+      }
+    }
+    let Some(i) = at else { break };
+    done[i] = true;
+    let w = &words[i];
+    let lead = w.iter().take_while(|&&b| !is_letter(b)).count();
+    let end = w.len() - w.iter().rev().take_while(|&&b| !is_letter(b) && b != b'-').count();
+    let body = &w[lead..end];
+    // До четырёх букв и дальше, пока последняя — гласная: «Проф», «Квал»
+    let mut cut = 4.min(body.len().saturating_sub(1));
+    while cut < body.len().saturating_sub(2) && vowels[body[cut - 1] as usize] {
+      cut += 1;
+    }
+    let mut short = w[..lead].to_vec();
+    short.extend_from_slice(&body[..cut]);
+    short.push(b'.');
+    words[i] = short;
+  }
+  let mut out = join(&words);
+  if out.len() > room {
+    out.truncate(room);
+    while out.last() == Some(&b' ') {
+      out.pop();
+    }
+  }
+  out
+}

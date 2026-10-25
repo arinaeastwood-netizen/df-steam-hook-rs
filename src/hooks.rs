@@ -379,12 +379,9 @@ fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool, sp
   let drawn = translated.as_ref().map(|t| &t[..t.len().saturating_sub(1)]);
   match crate::fit::settle(gps, key, drawn, in_flow, space) {
     Some(room) => {
+      // Не помещается — сократить словами («Проф. шахтёр»), а не обрубить
       let text = drawn.unwrap_or(key);
-      let mut cut = text[..room.min(text.len())].to_vec();
-      // Не оставлять пробел на конце обрезанной надписи
-      while cut.last() == Some(&b' ') {
-        cut.pop();
-      }
+      let mut cut = crate::fit::abbreviate(text, room);
       cut.push(0);
       Some(cut)
     }
