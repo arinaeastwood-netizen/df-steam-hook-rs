@@ -59,7 +59,16 @@ struct Span {
   x: i32,
   end: i32,
   key: Vec<u8>,
+  /// Когда надпись выведена: картинка считается закрывающей её, только
+  /// если нарисована сразу после — в том же проходе отрисовки. Фон
+  /// следующего кадра игра рисует раньше текста, но уже через десятки
+  /// миллисекунд, и по времени он отсекается. Граница кадра по первой
+  /// надписи для этого не годится: фон начала кадра попадает в прошлый.
+  at: std::time::Instant,
 }
+
+/// Сколько после вывода надписи картинка ещё считается нарисованной поверх неё.
+const OVERLAY_WINDOW: std::time::Duration = std::time::Duration::from_millis(3);
 
 struct State {
   /// Надписи этого кадра, которым может не хватить места: ряд → надписи
@@ -92,7 +101,11 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
   let Some((i, bit)) = row_bit(y) else { return };
   if let Ok(mut st) = STATE.try_lock() {
     let known = st.spans.get(&y).is_some_and(|v| v.iter().any(|s| s.x == x));
-    st.spans.entry(y).or_default().push(Span { x, end: x + len as i32, key: key.to_vec() });
+    let at = std::time::Instant::now();
+    let row = st.spans.entry(y).or_default();
+    // Та же надпись на новом кадре — заменить: время берётся последнее
+    row.retain(|s| s.x != x);
+    row.push(Span { x, end: x + len as i32, key: key.to_vec(), at });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
     if !known && !st.logged.contains(&(x, y)) && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 60 {
       st.logged.push((x, y));
@@ -137,19 +150,20 @@ fn tile(gps: usize) {
   }
   let Ok(mut st) = STATE.try_lock() else { return };
   let mut hits = Vec::new();
+  let now = std::time::Instant::now();
   if let Some(spans) = st.spans.get(&ty) {
     for s in spans {
-      if tx > s.x && tx < s.end {
-        hits.push(((s.x, ty, s.key.clone()), (tx - s.x - 1) as usize));
+      if tx > s.x && tx < s.end && now.duration_since(s.at) <= OVERLAY_WINDOW {
+        hits.push(((s.x, ty, s.key.clone()), (tx - s.x - 1) as usize, now.duration_since(s.at).as_micros()));
       }
     }
   }
   if st.covered.len() > 4096 {
     st.covered.clear();
   }
-  for (k, room) in hits {
+  for (k, room, micros) in hits {
     if !st.covered.contains_key(&k) && LOG_HIT.fetch_add(1, Ordering::Relaxed) < 40 {
-      log::info!("tiles: picture at ({tx},{ty}) covers text at ({},{}) -> room {room}", k.0, k.1);
+      log::info!("tiles: picture at ({tx},{ty}) covers text at ({},{}) -> room {room} ({micros} us after text)", k.0, k.1);
     }
     let e = st.covered.entry(k).or_insert(room);
     if room < *e {
