@@ -115,6 +115,7 @@ fn blank(text: &[u8]) -> bool {
 
 impl Tracker {
   fn next_frame(&mut self, mark: (i32, i32, usize)) {
+    crate::tiles::next_frame();
     self.gen = self.gen.wrapping_add(1);
     self.calls = 0;
     self.mark = Some(mark);
@@ -274,6 +275,22 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u
   let neighbor = match english_len {
     Some(len) => tracker.room(x, y, text.len()).filter(|&r| r >= len),
     None => None,
+  };
+  // Картинка (значок в таблице), которую игра рисует поверх надписи:
+  // надпись регистрируется, а место до картинки — с прошлого кадра
+  let tile_room = match english_len {
+    Some(len) => {
+      crate::tiles::text(x, y, text.len(), len, key);
+      crate::tiles::room(x, y, key).filter(|&r| r >= len && r < text.len())
+    }
+    None => None,
+  };
+  if let Some(r) = tile_room {
+    trace(x, y, text, space, Some(r), "abbreviate to picture");
+  }
+  let neighbor = match (neighbor, tile_room) {
+    (Some(a), Some(b)) => Some(a.min(b)),
+    (a, b) => a.or(b),
   };
   // Колонка таблицы: место по английскому тексту колонки
   let column_room = if column {

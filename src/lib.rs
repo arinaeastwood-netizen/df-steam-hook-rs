@@ -13,6 +13,7 @@ mod encoding;
 mod align;
 mod align_scan;
 mod fit;
+mod tiles;
 mod flow;
 mod hooks;
 mod utils;
@@ -61,6 +62,8 @@ extern "C" fn attach() {
     if CONFIG.settings.watchdog {
       watchdog::install();
     }
+    // Картинки поверх текста (значки в таблицах): до того, как игра начнёт рисовать
+    tiles::attach();
     // Нейроперевод: журнал промахов и второй словарь с горячей перезагрузкой
     ai::start();
     align::start();
