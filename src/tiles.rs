@@ -68,7 +68,9 @@ struct Span {
 }
 
 /// Сколько после вывода надписи картинка ещё считается нарисованной поверх неё.
-const OVERLAY_WINDOW: std::time::Duration = std::time::Duration::from_millis(3);
+/// Полоса прокрутки таблицы рисуется после всех строк — через несколько
+/// миллисекунд после заголовка; фон следующего кадра — через 15–20 мс.
+const OVERLAY_WINDOW: std::time::Duration = std::time::Duration::from_millis(8);
 
 struct State {
   /// Надписи этого кадра, которым может не хватить места: ряд → надписи
