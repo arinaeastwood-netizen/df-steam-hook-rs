@@ -66,10 +66,12 @@ struct State {
   spans: HashMap<i32, Vec<Span>>,
   /// Надпись (столбец, ряд, английский ключ) → клеток до картинки
   covered: HashMap<(i32, i32, Vec<u8>), usize>,
+  /// Отладка: надписи, уже записанные в лог
+  logged: Vec<(i32, i32)>,
 }
 
 static STATE: LazyLock<Mutex<State>> =
-  LazyLock::new(|| Mutex::new(State { spans: HashMap::new(), covered: HashMap::new() }));
+  LazyLock::new(|| Mutex::new(State { spans: HashMap::new(), covered: HashMap::new(), logged: Vec::new() }));
 
 /// Новый кадр: надписи прошлого кадра забываются (fit.rs, смена кадра).
 pub fn next_frame() {
@@ -92,7 +94,8 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
     let known = st.spans.get(&y).is_some_and(|v| v.iter().any(|s| s.x == x));
     st.spans.entry(y).or_default().push(Span { x, end: x + len as i32, key: key.to_vec() });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
-    if !known && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 40 {
+    if !known && !st.logged.contains(&(x, y)) && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 60 {
+      st.logged.push((x, y));
       log::info!("tiles: watch ({x},{y}) len={len} english={english_len}");
     }
   }
@@ -104,8 +107,27 @@ pub fn room(x: i32, y: i32, key: &[u8]) -> Option<usize> {
   STATE.try_lock().ok()?.covered.get(&(x, y, key.to_vec())).copied()
 }
 
+thread_local! {
+  /// Сейчас выводится текст: буквы шрифта игра рисует теми же функциями
+  /// картинок, и они не должны считаться картинками поверх надписи.
+  static IN_TEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Вывод текста (addst, addst_top, addst_flag): картинки, нарисованные
+/// внутри, — это буквы самой надписи, а не значки поверх неё.
+pub fn own_text<R>(draw: impl FnOnce() -> R) -> R {
+  let was = IN_TEXT.with(|f| f.replace(true));
+  let out = draw();
+  IN_TEXT.with(|f| f.set(was));
+  out
+}
+
 fn tile(gps: usize) {
   if gps == 0 || !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off {
+    return;
+  }
+  // Буквы выводимой надписи: шрифт игра рисует картинками
+  if IN_TEXT.with(|f| f.get()) {
     return;
   }
   let (tx, ty) = ai::cursor(gps);

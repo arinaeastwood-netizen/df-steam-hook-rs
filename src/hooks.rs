@@ -316,7 +316,7 @@ unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize,
             }
           }
           crate::ai::set_cursor(gps, px, py);
-          draw(cxxstr.as_ptr());
+          crate::tiles::own_text(|| draw(cxxstr.as_ptr()));
         }
         // Курсор — как после вывода самого слова
         crate::ai::set_cursor(gps, x + len, y);
@@ -356,9 +356,9 @@ unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize,
             cxxstr.ptr = cxxstr.sso.buf.as_mut_ptr();
           }
         }
-        draw(cxxstr.as_ptr())
+        crate::tiles::own_text(|| draw(cxxstr.as_ptr()))
       }
-      None => draw(src),
+      None => crate::tiles::own_text(|| draw(src)),
     }
   }
 }
@@ -424,11 +424,11 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
               cxxstr.ptr = cxxstr.sso.buf.as_mut_ptr();
             }
           }
-          original!(gps, cxxstr.as_ptr(), a3, a4, flag)
+          crate::tiles::own_text(|| original!(gps, cxxstr.as_ptr(), a3, a4, flag))
         }
-        _ => original!(gps, src, a3, a4, flag),
+        _ => crate::tiles::own_text(|| original!(gps, src, a3, a4, flag)),
       },
-      _ => original!(gps, src, a3, a4, flag),
+      _ => crate::tiles::own_text(|| original!(gps, src, a3, a4, flag)),
     }
   }
 }
