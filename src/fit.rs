@@ -58,6 +58,40 @@ fn visible(gps: usize, x: i32, y: i32) -> bool {
   x0 <= x && x <= x1 && y0 <= y && y <= y1
 }
 
+/// Ширина экрана в клетках (init.display.grid_x). Вывод текста
+/// прекращается на ней: addst сравнивает столбец с этим числом
+/// (52.05: 0xa99556 — mov eax,[rdi+0x84]; cmp eax,[rip+…]). Адрес числа
+/// берётся из самого addst, так что после обновления игры находится сам.
+static GRID_X: LazyLock<usize> = LazyLock::new(|| {
+  let addst = *crate::align::ADDST;
+  if addst == 0 {
+    return 0;
+  }
+  let code = unsafe { std::slice::from_raw_parts(addst as *const u8, 0x100) };
+  const PAT: [u8; 8] = [0x8b, 0x87, 0x84, 0, 0, 0, 0x3b, 0x05];
+  match code.windows(PAT.len()).position(|w| w == PAT) {
+    Some(at) => {
+      let cmp = at + 6;
+      let rel = i32::from_le_bytes(code[cmp + 2..cmp + 6].try_into().unwrap());
+      (addst as isize + cmp as isize + 6 + rel as isize) as usize
+    }
+    None => 0,
+  }
+});
+
+/// Сколько клеток до правого края экрана (включая клетку x).
+fn screen_room(x: i32) -> Option<usize> {
+  let at = *GRID_X;
+  if at == 0 {
+    return None;
+  }
+  let w = unsafe { std::ptr::read_unaligned(at as *const i32) };
+  if w <= 0 || w > 2000 || x < 0 || x >= w {
+    return None;
+  }
+  Some((w - x) as usize)
+}
+
 /// Сколько клеток до правого края рамки отсечения (включая клетку x).
 fn clip_room(gps: usize, x: i32) -> Option<usize> {
   let (x0, x1) = unsafe {
@@ -312,7 +346,15 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u
   // английская надпись: колонка «Expert Miner» на странице «Труд» уже
   // английского текста, и игра обрезает его тоже. Русскую надпись тогда
   // нужно сделать короче рамки («Эксп. шахтёр»), а не обрубить на «Экспертный ш»
-  let clip = clip_room(gps, x).filter(|&c| text.len() > c);
+  // Край экрана — тоже настоящая граница: заголовок «Выберите для
+  // использования на непромышленных работах» у правого края окна
+  // обрезается экраном, а не рамкой
+  let edge = screen_room(x);
+  let clip = match (clip_room(gps, x), edge) {
+    (Some(a), Some(b)) => Some(a.min(b)),
+    (a, b) => a.or(b),
+  }
+  .filter(|&c| text.len() > c);
   // Игра сама сокращает надпись до space знаков — это тоже настоящая граница
   let abbreviated = (space > 0 && text.len() > space as usize).then_some(space as usize);
   let clip = match (clip, abbreviated) {

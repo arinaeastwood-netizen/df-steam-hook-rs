@@ -59,6 +59,9 @@ struct Span {
   x: i32,
   end: i32,
   key: Vec<u8>,
+  /// Длина английского оригинала: картинка ближе этого — не значок
+  /// поверх надписи, а фон или чужая разметка, её не считаем
+  english: usize,
   /// Когда надпись выведена: картинка считается закрывающей её, только
   /// если нарисована сразу после — в том же проходе отрисовки. Фон
   /// следующего кадра игра рисует раньше текста, но уже через десятки
@@ -107,7 +110,7 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
     let row = st.spans.entry(y).or_default();
     // Та же надпись на новом кадре — заменить: время берётся последнее
     row.retain(|s| s.x != x);
-    row.push(Span { x, end: x + len as i32, key: key.to_vec(), at });
+    row.push(Span { x, end: x + len as i32, key: key.to_vec(), english: english_len, at });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
     if !known && !st.logged.contains(&(x, y)) && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 60 {
       st.logged.push((x, y));
@@ -155,7 +158,10 @@ fn tile(gps: usize) {
   let now = std::time::Instant::now();
   if let Some(spans) = st.spans.get(&ty) {
     for s in spans {
-      if tx > s.x && tx < s.end && now.duration_since(s.at) <= OVERLAY_WINDOW {
+      // Картинка ближе, чем кончается английский текст, — не значок
+      // поверх (игра раскладывала экран под английский): такие не
+      // запоминаются, иначе они затирали настоящее место
+      if tx >= s.x + s.english as i32 + 1 && tx < s.end && now.duration_since(s.at) <= OVERLAY_WINDOW {
         hits.push(((s.x, ty, s.key.clone()), (tx - s.x - 1) as usize, now.duration_since(s.at).as_micros()));
       }
     }

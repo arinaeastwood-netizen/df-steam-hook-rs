@@ -137,6 +137,16 @@ fn community(key: &[u8], construction: bool) -> Option<Vec<u8>> {
     if construction && !interface_label(key) {
       return None;
     }
+    // Перевод сообщества не помещается на экране — у приложения есть свой,
+    // под место (ключ с приставкой 0x18, см. writer.js)
+    if !construction && DICTIONARY.get(key).is_some() {
+      let mut fit_key = Vec::with_capacity(key.len() + 1);
+      fit_key.push(0x18);
+      fit_key.extend_from_slice(key);
+      if let Some(value) = ai::lookup(&fit_key) {
+        return Some(value);
+      }
+    }
     // При выводе — не отдельное слово строчными: так игра рисует по слову
     // связный текст (окна обучения, летопись), и пословный перевод
     // сообщества даёт кашу «вас назначить где ваш жители». Такие слова
