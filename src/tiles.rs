@@ -7,7 +7,8 @@
 //! при этом не задаёт — место ограничивает только картинка.
 //!
 //! Хук перехватывает функции, которыми игра рисует картинку в клетку
-//! (52.05: 0xa9ac90, 0xa9a660, 0xa9a7b0; ищутся по началу кода, так что
+//! (52.05: 0xa9ac90, 0xa9a660, 0xa9a7b0, 0xa9ae30 — по одной на каждый
+//! слой картинок; ищутся по началу кода, так что
 //! после обновления игры находятся сами). Картинка, нарисованная ПОСЛЕ
 //! надписи в том же кадре и внутри её клеток, — это то, что закрывает
 //! надпись. Фон под надписью игра рисует раньше текста, поэтому он не
@@ -32,6 +33,7 @@ static_detour! {
   static TILE_A: unsafe extern "system" fn(usize, u32, u8);
   static TILE_B: unsafe extern "system" fn(usize, u32, u8);
   static TILE_C: unsafe extern "system" fn(usize, u32, u8);
+  static TILE_D: unsafe extern "system" fn(usize, u32, u8);
 }
 
 /// Ряды (0..255), где в этом кадре была надпись длиннее английской.
@@ -171,11 +173,11 @@ pub fn attach() {
       at += pos + 1;
     }
   }
-  if found.is_empty() || found.len() > 3 {
-    log::warn!("tiles: {} drawing functions found, expected 1..3 — not attached", found.len());
+  if found.is_empty() || found.len() > 4 {
+    log::warn!("tiles: {} drawing functions found, expected 1..4 — not attached", found.len());
     return;
   }
-  let detours = [&TILE_A, &TILE_B, &TILE_C];
+  let detours = [&TILE_A, &TILE_B, &TILE_C, &TILE_D];
   let mut attached = 0;
   for (n, &addr) in found.iter().enumerate() {
     let target: unsafe extern "system" fn(usize, u32, u8) = unsafe { std::mem::transmute(addr) };
@@ -190,9 +192,13 @@ pub fn attach() {
           tile(gps);
           TILE_B.call(gps, tex, flag)
         }),
-        _ => detour.initialize(target, |gps, tex, flag| {
+        2 => detour.initialize(target, |gps, tex, flag| {
           tile(gps);
           TILE_C.call(gps, tex, flag)
+        }),
+        _ => detour.initialize(target, |gps, tex, flag| {
+          tile(gps);
+          TILE_D.call(gps, tex, flag)
         }),
       }
       .and_then(|d| d.enable())
