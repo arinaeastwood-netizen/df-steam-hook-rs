@@ -44,6 +44,10 @@ use crate::utils;
 /// Ряды (0..255), где в этом кадре была надпись длиннее английской.
 static ROWS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 
+/// Отладка: сколько строк уже записано в лог (не больше 40 каждого вида).
+static LOG_WATCH: AtomicUsize = AtomicUsize::new(0);
+static LOG_HIT: AtomicUsize = AtomicUsize::new(0);
+
 fn row_bit(y: i32) -> Option<(usize, u64)> {
   if !(0..256).contains(&y) {
     return None;
@@ -85,8 +89,12 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
   }
   let Some((i, bit)) = row_bit(y) else { return };
   if let Ok(mut st) = STATE.try_lock() {
+    let known = st.spans.get(&y).is_some_and(|v| v.iter().any(|s| s.x == x));
     st.spans.entry(y).or_default().push(Span { x, end: x + len as i32, key: key.to_vec() });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
+    if !known && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 40 {
+      log::info!("tiles: watch ({x},{y}) len={len} english={english_len}");
+    }
   }
 }
 
@@ -118,6 +126,9 @@ fn tile(gps: usize) {
     st.covered.clear();
   }
   for (k, room) in hits {
+    if !st.covered.contains_key(&k) && LOG_HIT.fetch_add(1, Ordering::Relaxed) < 40 {
+      log::info!("tiles: picture at ({tx},{ty}) covers text at ({},{}) -> room {room}", k.0, k.1);
+    }
     let e = st.covered.entry(k).or_insert(room);
     if room < *e {
       *e = room;
