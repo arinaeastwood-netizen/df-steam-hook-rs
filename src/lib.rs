@@ -16,6 +16,8 @@ mod fit;
 mod tiles;
 mod flow;
 mod hooks;
+mod search;
+mod textinput;
 mod utils;
 mod watchdog;
 

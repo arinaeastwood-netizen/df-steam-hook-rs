@@ -296,6 +296,12 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
 /// обрезается игрой, и это место уходит в fit.rs.
 unsafe fn draw_text(gps: usize, src: *const u8, converted: &[u8], target: usize, space: u32, draw: &dyn Fn(*const u8)) {
   unsafe {
+    // Текст, набранный игроком в поле ввода (поиск, имя), — как есть:
+    // без перевода и без записи в журнал (textinput.rs)
+    if crate::textinput::is_entry_text(converted) {
+      crate::tiles::own_text(|| draw(src));
+      return;
+    }
     let plan = crate::flow::begin(gps, converted, 0);
     let (shift, quiet, in_flow) = match plan {
       crate::flow::Plan::Pieces(pieces) => {
@@ -408,6 +414,7 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
+      converted if crate::textinput::is_entry_text(converted) => crate::tiles::own_text(|| original!(gps, src, a3, a4, flag)),
       converted => match {
         crate::ai::probe(b'F', gps, converted);
         // Четвёртый аргумент addst_flag — как space у addst: игра сама
@@ -491,45 +498,83 @@ impl StringEntry {
   pub const STRINGENTRY_FILENAME: u8 = 32;
 }
 
+/// Поле ввода игры (поиск, имена, названия). Аргументы на 52.05 (win64):
+/// строка поля, предельная длина, флаги, набор нажатых клавиш и буфер
+/// текста SDL на 32 байта — UTF-8 от Windows. Русские буквы дописывает
+/// textinput.rs, остальное — исходная функция, как в игре.
 #[cfg_attr(target_os = "windows", hook(by_offset))]
 #[cfg_attr(target_os = "linux", hook(by_symbol))]
 fn standardstringentry(src: *const u8, maxlen: usize, flag: u8, events_ptr: *const u8, utf: *const u32) -> bool {
   unsafe {
-    let utf_a = std::slice::from_raw_parts_mut(utf as *mut u32, 8);
+    #[cfg(target_os = "windows")]
+    {
+      // Длина приходит 32-битным числом
+      let maxlen32 = maxlen as u32 as usize;
+      let appended = if crate::ai::EXPERIMENTS.search_ru_off {
+        false
+      } else {
+        crate::textinput::before_entry(src, maxlen32, flag, utf as *mut u8)
+      };
+      let result = original!(src, maxlen, flag, events_ptr, utf);
+      crate::textinput::after_entry(src);
+      return appended || result;
+    }
+
     #[cfg(target_os = "linux")]
     {
       let utf_a = std::slice::from_raw_parts_mut(
         (*ENABLER + &CONFIG.offset.as_ref().unwrap().utf_input.unwrap()) as *mut u32,
         8,
       );
-    }
 
-    let content = CxxString::from_ptr(src);
-    let mut any_valid = false;
+      let content = CxxString::from_ptr(src);
+      let mut any_valid = false;
 
-    for i in 0..8 {
-      if utf_a[i] == 0 || utf_a[i] == 10 || content.size() >= maxlen {
-        break;
-      }
+      for i in 0..8 {
+        if utf_a[i] == 0 || utf_a[i] == 10 || content.size() >= maxlen {
+          break;
+        }
 
-      if utf_a[i] > 122 && CONFIG.encoding.utf.contains_key(&utf_a[i]) {
-        let entry = CONFIG.encoding.utf[&utf_a[i]];
-        utf_a[i] = match (flag & StringEntry::CAPS) > 0 {
-          true => capitalize(entry),
-          false => entry,
-        } as u32;
+        if utf_a[i] > 122 && CONFIG.encoding.utf.contains_key(&utf_a[i]) {
+          let entry = CONFIG.encoding.utf[&utf_a[i]];
+          utf_a[i] = match (flag & StringEntry::CAPS) > 0 {
+            true => capitalize(entry),
+            false => entry,
+          } as u32;
 
-        if content.size() < maxlen {
-          content.push_back(utf_a[i] as u8);
-          any_valid = true;
+          if content.size() < maxlen {
+            content.push_back(utf_a[i] as u8);
+            any_valid = true;
+          }
         }
       }
-    }
 
-    any_valid || original!(content.as_ptr(), maxlen, flag, events_ptr, utf_a.as_ptr())
+      any_valid || original!(content.as_ptr(), maxlen, flag, events_ptr, utf)
+    }
   }
 }
 
+/// Дописать байты в конец std::string игры её же функцией append: память
+/// строки выделяет и освобождает игра, поэтому и расти строка должна её
+/// кодом. Перехват append при этом обходится.
+pub unsafe fn game_append(dst: *const u8, bytes: &[u8]) {
+  if bytes.is_empty() {
+    return;
+  }
+  #[cfg(target_os = "windows")]
+  {
+    if CONFIG.settings.enable_translation {
+      handle_string_append_n.call(dst as *mut c_char, bytes.as_ptr(), bytes.len());
+      return;
+    }
+  }
+  let content = CxxString::from_ptr(dst);
+  for &b in bytes {
+    content.push_back(b);
+  }
+}
+
+#[allow(dead_code)]
 fn capitalize(symbol: u8) -> u8 {
   CONFIG.encoding.capitalize[symbol as usize]
 }
@@ -543,9 +588,15 @@ fn lowercast(symbol: u8) -> u8 {
 #[cfg_attr(target_os = "linux", hook(by_symbol))]
 fn simplify_string(src: *const u8) {
   unsafe {
-    let mut content = CxxString::from_ptr(src);
+    let content = CxxString::from_ptr(src);
+    // Русский поиск: перевод английского названия (search.rs). Ищется до
+    // упрощения — словари хранят надписи с заглавными буквами
+    let extra = crate::search::russian_key(content.to_bytes_without_nul());
     for i in 0..content.len {
       content[i] = CONFIG.encoding.simplify[content[i] as usize];
+    }
+    if let Some(extra) = extra {
+      game_append(src, &extra);
     }
   }
 }

@@ -344,6 +344,8 @@ pub struct Experiments {
   pub fit_off: bool,
   /// Аварийный выключатель выравнивания надписей по центру и краю (align.rs)
   pub align_off: bool,
+  /// Аварийный выключатель русского поиска (search.rs, textinput.rs)
+  pub search_ru_off: bool,
   pub screen_probe: bool,
 }
 
@@ -358,6 +360,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     english: has("english"),
     fit_off: has("fit_off"),
     align_off: has("align_off"),
+    search_ru_off: has("search_ru_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -480,7 +483,7 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, search_ru_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.colored_off,
@@ -488,6 +491,7 @@ pub fn start() {
     EXPERIMENTS.english,
     EXPERIMENTS.fit_off,
     EXPERIMENTS.align_off,
+    EXPERIMENTS.search_ru_off,
     EXPERIMENTS.screen_probe
   );
 }
@@ -532,6 +536,27 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
     send_entry(b'U', key.to_vec());
   }
   Some(value)
+}
+
+/// Поиск во втором словаре для русского поиска (search.rs): без отметки
+/// использования и без пропуска имён слов — на данные игры он не влияет.
+pub fn peek(key: &[u8]) -> Option<Vec<u8>> {
+  if AI_SIZE.load(Ordering::Relaxed) == 0 {
+    return None;
+  }
+  let map = AI_DICTIONARY.try_read().ok()?;
+  match map.get(key) {
+    Some(entry) => Some(entry.value.clone()),
+    None => by_template(&map, key),
+  }
+}
+
+/// Номер версии словарей: растёт при каждой перезагрузке. По нему
+/// русский поиск сбрасывает свой кэш переводов.
+static GENERATION: AtomicUsize = AtomicUsize::new(0);
+
+pub fn generation() -> usize {
+  GENERATION.load(Ordering::Relaxed)
 }
 
 // ==================== НАДПИСИ С ЧИСЛАМИ ====================
@@ -1114,6 +1139,7 @@ fn start_reloader(core_stamp: Option<SystemTime>) {
       let core_now = modified_at(PATH_AI_CORE);
       if core_now != last_core {
         last_core = load_core();
+        GENERATION.fetch_add(1, Ordering::Relaxed);
       }
 
       let current = modified_at(PATH_AI_DICTIONARY);
@@ -1138,6 +1164,7 @@ fn start_reloader(core_stamp: Option<SystemTime>) {
               if let Ok(mut guard) = AI_DICTIONARY.write() {
                 *guard = map;
                 AI_SIZE.store(size, Ordering::Relaxed);
+                GENERATION.fetch_add(1, Ordering::Relaxed);
                 log::info!("ai: dictionary reloaded, items {size}");
               }
               last = current;
@@ -1151,6 +1178,7 @@ fn start_reloader(core_stamp: Option<SystemTime>) {
             if let Ok(mut guard) = AI_DICTIONARY.write() {
               guard.clear();
               AI_SIZE.store(0, Ordering::Relaxed);
+              GENERATION.fetch_add(1, Ordering::Relaxed);
             }
             last = None;
           }

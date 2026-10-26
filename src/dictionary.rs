@@ -205,3 +205,20 @@ pub fn lookup_all(key: &[u8]) -> Option<Vec<u8>> {
 pub fn lookup_screen(gps: usize, key: &[u8]) -> Option<Vec<u8>> {
   ai::screen(gps, key, lookup_all)
 }
+
+/// Все переводы строки для русского поиска (search.rs): нейросетевой,
+/// сообщества и базовый. Без записи в журнал и без отметок
+/// использования — это не вывод на экран.
+pub fn search_values(key: &[u8]) -> Vec<Vec<u8>> {
+  let mut out = Vec::new();
+  if let Some(value) = ai::peek(key) {
+    out.push(value);
+  }
+  if let Some(value) = DICTIONARY.get(key) {
+    out.push(value.clone());
+  }
+  if let Some(value) = ai::lookup_core(key) {
+    out.push(value);
+  }
+  out
+}
