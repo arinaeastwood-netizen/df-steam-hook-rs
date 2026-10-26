@@ -15,6 +15,15 @@
 //! считается. Для такой надписи запоминается, сколько клеток до картинки;
 //! fit.rs сокращает надпись до этого места.
 //!
+//! Функции картинок — маленькие листовые функции, и компилятор игры
+//! знает, какие регистры они не трогают: вызывающий код держит в r11 и
+//! других «временных» регистрах указатели через вызов (цикл по значкам в
+//! 0xf9d40). Обычный перехват на Rust эти регистры портил, и игра падала
+//! в главном меню. Поэтому перехват идёт через переходник на ассемблере:
+//! он сохраняет все временные регистры (rax, rcx, rdx, r8–r11, xmm0–xmm5),
+//! вызывает проверку и прыгает в исходную функцию с нетронутыми
+//! регистрами — для игры вызов выглядит так же, как без хука.
+//!
 //! Перехват дешёвый: картинка проверяется, только если на её ряду в этом
 //! кадре была надпись, которой может не хватить места (русская длиннее
 //! английской). Таких рядов немного, остальные картинки проходят без
@@ -24,17 +33,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use retour::static_detour;
+use std::sync::atomic::AtomicUsize;
+use std::sync::OnceLock;
+
+use retour::RawDetour;
 
 use crate::ai;
 use crate::utils;
-
-static_detour! {
-  static TILE_A: unsafe extern "system" fn(usize, u32, u8);
-  static TILE_B: unsafe extern "system" fn(usize, u32, u8);
-  static TILE_C: unsafe extern "system" fn(usize, u32, u8);
-  static TILE_D: unsafe extern "system" fn(usize, u32, u8);
-}
 
 /// Ряды (0..255), где в этом кадре была надпись длиннее английской.
 static ROWS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
@@ -127,9 +132,73 @@ fn tile(gps: usize) {
 const PATTERNS: &[&[u8]] = &[
   // 0xa9ac90: mov r9, rcx; mov r10d, edx; mov ecx, [rcx+0x84]; cmp ecx, [r9+0x288]
   &[0x4c, 0x8b, 0xc9, 0x44, 0x8b, 0xd2, 0x8b, 0x89, 0x84, 0, 0, 0, 0x41, 0x3b, 0x89, 0x88, 0x02, 0, 0],
-  // 0xa9a660, 0xa9a7b0: mov r8, rcx; mov r10d, edx; mov ecx, [rcx+0x84]; cmp ecx, [r8+0x288]
+  // 0xa9a660, 0xa9a7b0, 0xa9ae30: mov r8, rcx; mov r10d, edx; mov ecx, [rcx+0x84]; cmp ecx, [r8+0x288]
   &[0x4c, 0x8b, 0xc1, 0x44, 0x8b, 0xd2, 0x8b, 0x89, 0x84, 0, 0, 0, 0x41, 0x3b, 0x88, 0x88, 0x02, 0, 0],
 ];
+
+/// Адреса исходных функций (переходник retour) для каждого переходника.
+static ORIG_A: AtomicUsize = AtomicUsize::new(0);
+static ORIG_B: AtomicUsize = AtomicUsize::new(0);
+static ORIG_C: AtomicUsize = AtomicUsize::new(0);
+static ORIG_D: AtomicUsize = AtomicUsize::new(0);
+
+/// Проверка из переходника: в rcx — gps, как у исходной функции.
+extern "C" fn tile_entry(gps: usize) {
+  tile(gps);
+}
+
+/// Переходник: сохранить временные регистры, вызвать tile_entry(rcx),
+/// восстановить регистры и прыгнуть в исходную функцию.
+/// На входе rsp ≡ 8 (mod 16); после 7 push — ≡ 0; 0x80 байт под xmm и
+/// теневое пространство сохраняют выравнивание для вызова.
+macro_rules! stub {
+  ($name:ident, $orig:ident) => {
+    #[unsafe(naked)]
+    unsafe extern "C" fn $name() {
+      core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "sub rsp, 0x80",
+        "movdqu [rsp + 0x20], xmm0",
+        "movdqu [rsp + 0x30], xmm1",
+        "movdqu [rsp + 0x40], xmm2",
+        "movdqu [rsp + 0x50], xmm3",
+        "movdqu [rsp + 0x60], xmm4",
+        "movdqu [rsp + 0x70], xmm5",
+        "call {entry}",
+        "movdqu xmm0, [rsp + 0x20]",
+        "movdqu xmm1, [rsp + 0x30]",
+        "movdqu xmm2, [rsp + 0x40]",
+        "movdqu xmm3, [rsp + 0x50]",
+        "movdqu xmm4, [rsp + 0x60]",
+        "movdqu xmm5, [rsp + 0x70]",
+        "add rsp, 0x80",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "jmp qword ptr [rip + {orig}]",
+        entry = sym tile_entry,
+        orig = sym $orig,
+      )
+    }
+  };
+}
+
+stub!(stub_a, ORIG_A);
+stub!(stub_b, ORIG_B);
+stub!(stub_c, ORIG_C);
+stub!(stub_d, ORIG_D);
+
+static DETOURS: OnceLock<Vec<RawDetour>> = OnceLock::new();
 
 /// Секция кода игры в памяти.
 fn text_section() -> Option<&'static [u8]> {
@@ -158,7 +227,8 @@ fn text_section() -> Option<&'static [u8]> {
 /// Перехват картинок. Вызывается при запуске, до того как игра начнёт
 /// рисовать. Не нашлось — работает всё остальное, только без картинок.
 pub fn attach() {
-  if !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off {
+  // Переходник рассчитан на соглашение о вызовах Windows (аргумент в rcx)
+  if cfg!(not(target_os = "windows")) || !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off {
     return;
   }
   let Some(code) = text_section() else {
@@ -177,36 +247,23 @@ pub fn attach() {
     log::warn!("tiles: {} drawing functions found, expected 1..4 — not attached", found.len());
     return;
   }
-  let detours = [&TILE_A, &TILE_B, &TILE_C, &TILE_D];
-  let mut attached = 0;
+  let stubs: [unsafe extern "C" fn(); 4] = [stub_a, stub_b, stub_c, stub_d];
+  let origs = [&ORIG_A, &ORIG_B, &ORIG_C, &ORIG_D];
+  let mut detours = Vec::new();
   for (n, &addr) in found.iter().enumerate() {
-    let target: unsafe extern "system" fn(usize, u32, u8) = unsafe { std::mem::transmute(addr) };
-    let detour = detours[n];
-    let ok = unsafe {
-      match n {
-        0 => detour.initialize(target, |gps, tex, flag| {
-          tile(gps);
-          TILE_A.call(gps, tex, flag)
-        }),
-        1 => detour.initialize(target, |gps, tex, flag| {
-          tile(gps);
-          TILE_B.call(gps, tex, flag)
-        }),
-        2 => detour.initialize(target, |gps, tex, flag| {
-          tile(gps);
-          TILE_C.call(gps, tex, flag)
-        }),
-        _ => detour.initialize(target, |gps, tex, flag| {
-          tile(gps);
-          TILE_D.call(gps, tex, flag)
-        }),
+    let made = unsafe { RawDetour::new(addr as *const (), stubs[n] as *const ()) };
+    match made {
+      Ok(detour) => {
+        // Адрес исходной функции — до включения перехвата
+        origs[n].store(detour.trampoline() as *const () as usize, Ordering::SeqCst);
+        match unsafe { detour.enable() } {
+          Ok(_) => detours.push(detour),
+          Err(err) => log::warn!("tiles: unable to enable 0x{:x}: {err:?}", addr - utils::address(0)),
+        }
       }
-      .and_then(|d| d.enable())
-    };
-    match ok {
-      Ok(_) => attached += 1,
       Err(err) => log::warn!("tiles: unable to attach 0x{:x}: {err:?}", addr - utils::address(0)),
     }
   }
-  log::info!("tiles: {attached} drawing functions attached");
+  log::info!("tiles: {} drawing functions attached", detours.len());
+  let _ = DETOURS.set(detours);
 }
