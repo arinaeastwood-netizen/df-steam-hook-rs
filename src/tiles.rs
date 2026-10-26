@@ -62,6 +62,12 @@ struct Span {
   /// Длина английского оригинала: картинка ближе этого — не значок
   /// поверх надписи, а фон или чужая разметка, её не считаем
   english: usize,
+  /// В этом проходе уже была картинка там, где стоял бы английский текст:
+  /// это фон следующего кадра (игра рисует фон перед текстом, слева
+  /// направо). Всё, что нарисовано после него, к этой надписи не относится
+  background: bool,
+  /// Ближайшая картинка поверх надписи в этом проходе (до фона)
+  candidate: Option<usize>,
   /// Когда надпись выведена: картинка считается закрывающей её, только
   /// если нарисована сразу после — в том же проходе отрисовки. Фон
   /// следующего кадра игра рисует раньше текста, но уже через десятки
@@ -70,10 +76,9 @@ struct Span {
   at: std::time::Instant,
 }
 
-/// Сколько после вывода надписи картинка ещё считается нарисованной поверх неё.
-/// Полоса прокрутки таблицы рисуется после всех строк — через несколько
-/// миллисекунд после заголовка; фон следующего кадра — через 15–20 мс.
-const OVERLAY_WINDOW: std::time::Duration = std::time::Duration::from_millis(8);
+/// Граница прохода — фон (см. Span::background); время только страхует
+/// от совсем старых надписей.
+const OVERLAY_WINDOW: std::time::Duration = std::time::Duration::from_millis(40);
 
 struct State {
   /// Надписи этого кадра, которым может не хватить места: ряд → надписи
@@ -107,10 +112,36 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
   if let Ok(mut st) = STATE.try_lock() {
     let known = st.spans.get(&y).is_some_and(|v| v.iter().any(|s| s.x == x));
     let at = std::time::Instant::now();
+    // Та же надпись на новом кадре: картинка, найденная в прошлом проходе
+    // поверх неё (до фона следующего кадра), запоминается
+    let mut done: Option<(Vec<u8>, usize)> = None;
+    if let Some(row) = st.spans.get(&y) {
+      if let Some(old) = row.iter().find(|s| s.x == x) {
+        if let Some(room) = old.candidate {
+          done = Some((old.key.clone(), room));
+        }
+      }
+    }
+    if let Some((old_key, room)) = done {
+      if !st.covered.contains_key(&(x, y, old_key.clone())) && LOG_HIT.fetch_add(1, Ordering::Relaxed) < 40 {
+        log::info!("tiles: picture covers text at ({x},{y}) -> room {room}");
+      }
+      let e = st.covered.entry((x, y, old_key)).or_insert(room);
+      if room < *e {
+        *e = room;
+      }
+    }
     let row = st.spans.entry(y).or_default();
-    // Та же надпись на новом кадре — заменить: время берётся последнее
     row.retain(|s| s.x != x);
-    row.push(Span { x, end: x + len as i32, key: key.to_vec(), english: english_len, at });
+    row.push(Span {
+      x,
+      end: x + len as i32,
+      key: key.to_vec(),
+      english: english_len,
+      background: false,
+      candidate: None,
+      at,
+    });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
     if !known && !st.logged.contains(&(x, y)) && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 60 {
       st.logged.push((x, y));
@@ -154,28 +185,27 @@ fn tile(gps: usize) {
     return;
   }
   let Ok(mut st) = STATE.try_lock() else { return };
-  let mut hits = Vec::new();
   let now = std::time::Instant::now();
-  if let Some(spans) = st.spans.get(&ty) {
-    for s in spans {
-      // Картинка ближе, чем кончается английский текст, — не значок
-      // поверх (игра раскладывала экран под английский): такие не
-      // запоминаются, иначе они затирали настоящее место
-      if tx >= s.x + s.english as i32 + 1 && tx < s.end && now.duration_since(s.at) <= OVERLAY_WINDOW {
-        hits.push(((s.x, ty, s.key.clone()), (tx - s.x - 1) as usize, now.duration_since(s.at).as_micros()));
-      }
-    }
-  }
   if st.covered.len() > 4096 {
     st.covered.clear();
   }
-  for (k, room, micros) in hits {
-    if !st.covered.contains_key(&k) && LOG_HIT.fetch_add(1, Ordering::Relaxed) < 40 {
-      log::info!("tiles: picture at ({tx},{ty}) covers text at ({},{}) -> room {room} ({micros} us after text)", k.0, k.1);
-    }
-    let e = st.covered.entry(k).or_insert(room);
-    if room < *e {
-      *e = room;
+  if let Some(spans) = st.spans.get_mut(&ty) {
+    for s in spans.iter_mut() {
+      if s.background || now.duration_since(s.at) > OVERLAY_WINDOW {
+        continue;
+      }
+      if tx > s.x && tx <= s.x + s.english as i32 {
+        // Картинка там, где стоял английский текст: игра своих значков
+        // поверх своего текста не ставит — это фон следующего кадра.
+        // Дальше в этом проходе ничего не считается
+        s.background = true;
+      } else if tx > s.x + s.english as i32 + 1 && tx < s.end {
+        // Значок справа от английского текста, внутри русского. Место
+        // строго больше английской длины: значок вплотную за английским
+        // текстом без пробела не бывает
+        let room = (tx - s.x - 1) as usize;
+        s.candidate = Some(s.candidate.map_or(room, |c| c.min(room)));
+      }
     }
   }
 }
