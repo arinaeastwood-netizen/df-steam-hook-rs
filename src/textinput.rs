@@ -10,9 +10,9 @@
 //! Здесь хук сам разбирает буфер:
 //!   — русская буква переводится в байт шрифта игры (cp866 или cp1251,
 //!     по encoding.toml установленной сборки dfint);
-//!   — латинская буква при русской раскладке окна игры переводится по
-//!     клавише («r» → «к»): на случай, если Windows отдала окну латиницу;
 //!   — всё остальное фильтруется так же, как это делает сама игра.
+//! Раскладку хук не угадывает: Windows сама присылает русские буквы при
+//! русской раскладке и латиницу при английской (проверено по логу).
 //! Готовые буквы дописываются в строку поля функцией самой игры, затем
 //! вызывается исходная функция с пустым буфером: она обрабатывает
 //! Backspace и Enter и очищает нажатые клавиши, чтобы набранная буква не
@@ -24,7 +24,9 @@
 //! русский поиск (search.rs).
 //!
 //! Первые записи о каждом вводе попадают в dfint-log.log строками
-//! «input:»: байты, пришедшие от Windows, и раскладка окна игры.
+//! «input:»: байты, пришедшие от Windows, и раскладка окна на переднем
+//! плане. Раскладку своего потока игра не меняет: ввод обрабатывается
+//! не в том потоке, которому принадлежит окно.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -86,22 +88,23 @@ enum Item {
   Ascii(u8),
 }
 
-/// Перед исходной функцией поля ввода. Если в буфере есть русские буквы
-/// (или латиница при русской раскладке), дописывает их в строку поля
-/// сама и очищает буфер. Возвращает, дописано ли что-нибудь.
+/// Перед исходной функцией поля ввода. Если в буфере есть русские буквы,
+/// дописывает их в строку поля сама и очищает буфер. Возвращает, дописано
+/// ли что-нибудь.
 pub unsafe fn before_entry(src: *const u8, maxlen: usize, flag: u8, buf: *mut u8) -> bool {
   if src.is_null() || buf.is_null() {
     return false;
   }
   let raw_all = std::slice::from_raw_parts(buf as *const u8, TEXT_BUF);
   let end = raw_all.iter().position(|&b| b == 0).unwrap_or(TEXT_BUF);
-  let raw = &raw_all[..end];
+  // Копия: буфер ниже очищается, а в лог нужны пришедшие байты
+  let raw = raw_all[..end].to_vec();
+  let raw = raw.as_slice();
   if raw.is_empty() {
     return false;
   }
 
   let layout = keyboard_layout();
-  let cyrillic_layout = is_cyrillic_layout(layout.game);
 
   // Имена файлов — только латиница, как в игре. Перевод строки — особый
   // случай многострочных полей, его игра обрабатывает сама
@@ -118,13 +121,6 @@ pub unsafe fn before_entry(src: *const u8, maxlen: usize, flag: u8, buf: *mut u8
   let mut special = false;
   for ch in text.chars() {
     if ch.is_ascii() {
-      if cyrillic_layout {
-        if let Some(byte) = by_position(ch).and_then(to_game) {
-          items.push(Item::Game(byte));
-          special = true;
-          continue;
-        }
-      }
       items.push(Item::Ascii(ch as u8));
     } else if let Some(byte) = to_game(ch) {
       items.push(Item::Game(byte));
@@ -170,7 +166,7 @@ pub unsafe fn before_entry(src: *const u8, maxlen: usize, flag: u8, buf: *mut u8
     return false;
   }
   crate::hooks::game_append(src, &out);
-  log_input(raw, &layout, flag, if cyrillic_layout { "russian (layout)" } else { "russian" });
+  log_input(raw, &layout, flag, "russian");
   true
 }
 
@@ -201,21 +197,6 @@ fn to_game(ch: char) -> Option<u8> {
     key |= (b as u32) << (8 * i);
   }
   CONFIG.encoding.utf.get(&key).copied()
-}
-
-/// Латинская клавиша → русская буква на той же клавише (ЙЦУКЕН).
-fn by_position(c: char) -> Option<char> {
-  const LOWER: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
-  const LOWER_RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюё";
-  const UPPER: &str = "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~";
-  const UPPER_RU: &str = "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮЁ";
-  if let Some(i) = LOWER.chars().position(|x| x == c) {
-    return LOWER_RU.chars().nth(i);
-  }
-  if let Some(i) = UPPER.chars().position(|x| x == c) {
-    return UPPER_RU.chars().nth(i);
-  }
-  None
 }
 
 /// После исходной функции поля ввода: запоминает, что теперь написано в поле.
@@ -294,9 +275,8 @@ fn note_russian_search() {
 // ==================== РАСКЛАДКА ====================
 
 struct Layout {
-  /// Язык раскладки потока игры — по ней Windows переводит клавиши в буквы
-  game: u16,
-  /// Язык раскладки окна на переднем плане
+  /// Язык раскладки окна на переднем плане — по ней Windows переводит
+  /// клавиши в буквы для окна игры
   foreground: u16,
 }
 
@@ -304,7 +284,6 @@ struct Layout {
 fn keyboard_layout() -> Layout {
   use winapi::um::winuser::{GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId};
   unsafe {
-    let game = (GetKeyboardLayout(0) as usize & 0xffff) as u16;
     let window = GetForegroundWindow();
     let foreground = if window.is_null() {
       0
@@ -316,18 +295,13 @@ fn keyboard_layout() -> Layout {
         (GetKeyboardLayout(thread) as usize & 0xffff) as u16
       }
     };
-    Layout { game, foreground }
+    Layout { foreground }
   }
 }
 
 #[cfg(not(target_os = "windows"))]
 fn keyboard_layout() -> Layout {
-  Layout { game: 0, foreground: 0 }
-}
-
-/// Русская, украинская, белорусская или казахская раскладка.
-fn is_cyrillic_layout(lang: u16) -> bool {
-  matches!(lang & 0x3ff, 0x19 | 0x22 | 0x23 | 0x3f)
+  Layout { foreground: 0 }
 }
 
 fn log_input(raw: &[u8], layout: &Layout, flag: u8, result: &str) {
@@ -336,9 +310,8 @@ fn log_input(raw: &[u8], layout: &Layout, flag: u8, result: &str) {
   }
   let hex: Vec<String> = raw.iter().map(|b| format!("{b:02X}")).collect();
   log::info!(
-    "input: bytes [{}] layout game={:04x} foreground={:04x} flags={:#04x} -> {}",
+    "input: bytes [{}] layout={:04x} flags={:#04x} -> {}",
     hex.join(" "),
-    layout.game,
     layout.foreground,
     flag,
     result

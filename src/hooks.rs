@@ -108,6 +108,7 @@ pub unsafe fn attach_all() -> Result<()> {
     attach_lower_case_string()?;
     attach_capitalize_string_words()?;
     attach_capitalize_string_first_word()?;
+    crate::search::attach();
   }
   Ok(())
 }
@@ -139,6 +140,7 @@ pub unsafe fn enable_search() -> Result<()> {
   enable_lower_case_string()?;
   enable_capitalize_string_words()?;
   enable_capitalize_string_first_word()?;
+  crate::search::set_enabled(true);
   Ok(())
 }
 
@@ -175,6 +177,7 @@ pub unsafe fn disable_search() -> Result<()> {
   disable_lower_case_string()?;
   disable_capitalize_string_words()?;
   disable_capitalize_string_first_word()?;
+  crate::search::set_enabled(false);
   Ok(())
 }
 
