@@ -240,6 +240,13 @@ fn take_run(run: &mut Run) -> RunParts {
 // «Болтливый» — игра выводит одинаково для обоих полов. Пока значок ♀
 // виден (окно перерисовывается каждый кадр), хук ищет для надписей
 // женскую форму: ключ с приставкой 0x1B 'f'.
+//
+// Пока виден значок ♂, хук ищет форму для окна дварфа-мужчины: ключ с
+// приставкой 0x1B 'm'. Она есть только у подписей к имени другого
+// дварфа: «Spouse:» словарь сообщества переводит как «Супруг:», а в
+// окне мужчины речь о его жене — «Супруга: Эсмеральда». Эти записи
+// приложение строит само из готового перевода надписи, поэтому промах
+// в журнал не пишется.
 
 const GENDER_NONE: u8 = 0;
 const GENDER_FEMALE: u8 = 1;
@@ -272,6 +279,19 @@ fn female_context() -> bool {
     && now_ms().saturating_sub(GENDER_AT.load(Ordering::Relaxed)) <= GENDER_TTL_MS
 }
 
+fn male_context() -> bool {
+  GENDER.load(Ordering::Relaxed) == GENDER_MALE
+    && now_ms().saturating_sub(GENDER_AT.load(Ordering::Relaxed)) <= GENDER_TTL_MS
+}
+
+/// Ключ формы надписи для окна дварфа: приставка 0x1B и буква пола.
+fn gender_key(letter: u8, key: &[u8]) -> Vec<u8> {
+  let mut gkey = Vec::with_capacity(key.len() + 2);
+  gkey.extend_from_slice(&[0x1b, letter]);
+  gkey.extend_from_slice(key);
+  gkey
+}
+
 /// Надпись, у которой может быть женская форма: без цифр, с буквами,
 /// не больше четырёх слов — или фраза в кавычках («"I've been rained
 /// on.  It's annoying."»): так в окне дварфа выводится его речь.
@@ -290,18 +310,25 @@ fn gender_candidate(key: &[u8]) -> bool {
   letters >= 3 && (words <= 4 || (quote && words <= 30))
 }
 
-/// Обычный поиск с учётом пола: при видимом ♀ сначала женская форма.
+/// Обычный поиск с учётом пола: при видимом ♀ сначала женская форма,
+/// при видимом ♂ — форма для окна мужчины.
 /// Надпись, для которой женской формы ещё нет, записывается в журнал
-/// (тип G) — приложение решит, меняется ли она.
+/// (тип G) — приложение решит, меняется ли она. Форм для окна мужчины
+/// нет у большинства надписей, и промах по ним в журнал не пишется.
 fn plain_gendered(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
-  if female_context() && gender_candidate(key) {
-    let mut gkey = Vec::with_capacity(key.len() + 2);
-    gkey.extend_from_slice(&[0x1b, b'f']);
-    gkey.extend_from_slice(key);
-    if let Some(value) = lookup(&gkey) {
+  // Сначала дешёвая проверка значка пола: вне окна дварфа надпись
+  // проверять незачем
+  let female = female_context();
+  let male = !female && male_context();
+  if (female || male) && gender_candidate(key) {
+    if female {
+      if let Some(value) = lookup(&gender_key(b'f', key)) {
+        return Some(value);
+      }
+      send_entry(b'G', key.to_vec());
+    } else if let Some(value) = lookup(&gender_key(b'm', key)) {
       return Some(value);
     }
-    send_entry(b'G', key.to_vec());
   }
   plain(key)
 }
