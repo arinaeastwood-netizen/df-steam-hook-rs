@@ -373,6 +373,8 @@ pub struct Experiments {
   pub align_off: bool,
   /// Аварийный выключатель русского поиска (search.rs, textinput.rs)
   pub search_ru_off: bool,
+  /// Аварийный выключатель перевода текста до раскладки (wrap.rs)
+  pub wrap_off: bool,
   pub screen_probe: bool,
 }
 
@@ -388,6 +390,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     fit_off: has("fit_off"),
     align_off: has("align_off"),
     search_ru_off: has("search_ru_off"),
+    wrap_off: has("wrap_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -510,7 +513,7 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, search_ru_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, search_ru_off={}, wrap_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.colored_off,
@@ -519,6 +522,7 @@ pub fn start() {
     EXPERIMENTS.fit_off,
     EXPERIMENTS.align_off,
     EXPERIMENTS.search_ru_off,
+    EXPERIMENTS.wrap_off,
     EXPERIMENTS.screen_probe
   );
 }
@@ -676,13 +680,21 @@ fn plain_or_miss(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<
 /// запись промахов. plain — обычный поиск по словарям.
 pub fn screen(gps: usize, key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
   note_gender(key);
+  // Строка русского текста, который игра сама перенесла по ширине окна
+  // (wrap.rs): уже переведена, выводится как есть
+  if crate::wrap::is_output(key) {
+    return None;
+  }
+  // Строка английского текста, который целиком уже в журнале (wrap.rs):
+  // перевод ищется как обычно, но промах отдельно не записывается
+  let quiet = crate::wrap::is_pending(key);
   let (x, y) = cursor(gps);
   let continues = continues_paragraph(key);
 
   let mut run = match RUN.try_lock() {
     Ok(run) => run,
     // Состояние занято — без сборки абзаца, но и без задержки кадра
-    Err(_) => return plain_or_miss(key, plain),
+    Err(_) => return if quiet { plain_gendered(key, plain) } else { plain_or_miss(key, plain) },
   };
 
   // Строка не на следующем ряду с того же края — прежний абзац
@@ -700,7 +712,7 @@ pub fn screen(gps: usize, key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Op
     if let Some((lines, missed)) = broken {
       finish_run(lines, missed);
     }
-    return plain_or_miss(key, plain);
+    return if quiet { plain_gendered(key, plain) } else { plain_or_miss(key, plain) };
   }
 
   // Цепочка разрослась сверх меры — это не абзац; сбрасываем её
@@ -726,7 +738,7 @@ pub fn screen(gps: usize, key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Op
     Some(value) => Some(value),
     None => plain_gendered(key, plain),
   };
-  run.missed.push(result.is_none());
+  run.missed.push(result.is_none() && !quiet);
 
   let finished = if continues { None } else { Some(take_run(&mut run)) };
 

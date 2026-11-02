@@ -20,6 +20,7 @@ mod search;
 mod textinput;
 mod utils;
 mod watchdog;
+mod wrap;
 
 use log::{debug, error, info};
 
@@ -68,6 +69,9 @@ extern "C" fn attach() {
     tiles::attach();
     // Нейроперевод: журнал промахов и второй словарь с горячей перезагрузкой
     ai::start();
+    // Перевод длинного текста до раскладки: игра сама переносит русский
+    // текст по ширине окна (wrap.rs)
+    unsafe { wrap::attach() };
     align::start();
   }
 }

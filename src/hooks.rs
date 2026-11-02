@@ -130,6 +130,7 @@ pub unsafe fn enable_translation() -> Result<()> {
   if ADDCOLOREDST_ATTACHED.load(Ordering::Relaxed) {
     enable_addcoloredst()?;
   }
+  crate::wrap::set_enabled(true);
   Ok(())
 }
 
@@ -167,6 +168,7 @@ pub unsafe fn disable_translation() -> Result<()> {
   if ADDCOLOREDST_ATTACHED.load(Ordering::Relaxed) {
     disable_addcoloredst()?;
   }
+  crate::wrap::set_enabled(false);
   Ok(())
 }
 
