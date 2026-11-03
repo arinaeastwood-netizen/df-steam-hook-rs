@@ -5,6 +5,7 @@ extern crate serde_derive;
 extern crate toml;
 
 mod ai;
+mod buttons;
 mod config;
 mod constants;
 mod cxxstring;
@@ -72,6 +73,8 @@ extern "C" fn attach() {
     // Перевод длинного текста до раскладки: игра сама переносит русский
     // текст по ширине окна (wrap.rs)
     unsafe { wrap::attach() };
+    // Кнопки фиксированной ширины: рамка под длину перевода (buttons.rs)
+    unsafe { buttons::attach() };
     align::start();
   }
 }

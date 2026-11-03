@@ -375,6 +375,8 @@ pub struct Experiments {
   pub search_ru_off: bool,
   /// Аварийный выключатель перевода текста до раскладки (wrap.rs)
   pub wrap_off: bool,
+  /// Аварийный выключатель расширения кнопок под перевод (buttons.rs)
+  pub buttons_off: bool,
   pub screen_probe: bool,
 }
 
@@ -391,6 +393,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     align_off: has("align_off"),
     search_ru_off: has("search_ru_off"),
     wrap_off: has("wrap_off"),
+    buttons_off: has("buttons_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -513,7 +516,7 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, search_ru_off={}, wrap_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, search_ru_off={}, wrap_off={}, buttons_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.colored_off,
@@ -523,6 +526,7 @@ pub fn start() {
     EXPERIMENTS.align_off,
     EXPERIMENTS.search_ru_off,
     EXPERIMENTS.wrap_off,
+    EXPERIMENTS.buttons_off,
     EXPERIMENTS.screen_probe
   );
 }
@@ -679,6 +683,8 @@ fn plain_or_miss(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<
 /// Строка, выводимая на экран: сборка абзаца, перевод с контекстом,
 /// запись промахов. plain — обычный поиск по словарям.
 pub fn screen(gps: usize, key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+  // Рамки кнопок фиксированной ширины — под перевод их надписей (buttons.rs)
+  crate::buttons::refresh();
   note_gender(key);
   // Строка русского текста, который игра сама перенесла по ширине окна
   // (wrap.rs): уже переведена, выводится как есть
@@ -1170,6 +1176,8 @@ fn start_reloader(core_stamp: Option<SystemTime>) {
         let ui_now = modified_at(PATH_AI_UI);
         if ui_now != last_ui {
           last_ui = load_ui();
+          // Новый перевод надписи — пересчитать рамки кнопок (buttons.rs)
+          GENERATION.fetch_add(1, Ordering::Relaxed);
         }
       }
 
