@@ -311,19 +311,16 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u
     None => None,
   };
   // Картинка (значок в таблице), которую игра рисует поверх надписи:
-  // надпись регистрируется, а место до картинки — с прошлого кадра
-  let (tile_room, border_room) = match english_len {
+  // надпись регистрируется, а место до картинки — с прошлого кадра.
+  // Граница клетки (линия сетки, край окна, tiles::detect_border) здесь
+  // не используется: текст под неё не режется — под текст должны
+  // расширяться рамки. Хук только записывает найденные границы в лог
+  let tile_room = match english_len {
     Some(len) => {
       crate::tiles::text(x, y, text.len(), len, key);
-      let picture = crate::tiles::room(x, y, key).filter(|&r| r >= len && r < text.len());
-      // Граница клетки (линия сетки, край окна) — настоящий край, как
-      // рамка отсечения: место по ней, даже если оно меньше английской
-      // длины (надпись могло сдвинуть вправо более длинное русское слово
-      // перед ней: «Начинающий в дисциплине» и «(отвыкла)» после него)
-      let border = crate::tiles::border(x, y, key).filter(|&r| r >= 2 && r < text.len());
-      (picture, border)
+      crate::tiles::room(x, y, key).filter(|&r| r >= len && r < text.len())
     }
-    None => (None, None),
+    None => None,
   };
   if let Some(r) = tile_room {
     trace(x, y, text, space, Some(r), "abbreviate to picture");
@@ -356,11 +353,11 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u
   // использования на непромышленных работах» у правого края окна
   // обрезается экраном, а не рамкой
   let edge = screen_room(x);
-  let clip = [clip_room(gps, x), edge, border_room]
-    .into_iter()
-    .flatten()
-    .min()
-    .filter(|&c| text.len() > c);
+  let clip = match (clip_room(gps, x), edge) {
+    (Some(a), Some(b)) => Some(a.min(b)),
+    (a, b) => a.or(b),
+  }
+  .filter(|&c| text.len() > c);
   // Игра сама сокращает надпись до space знаков — это тоже настоящая граница
   let abbreviated = (space > 0 && text.len() > space as usize).then_some(space as usize);
   let clip = match (clip, abbreviated) {

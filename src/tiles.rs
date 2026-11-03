@@ -90,9 +90,9 @@ struct State {
   spans: HashMap<i32, Vec<Span>>,
   /// Картинки за кадр на рядах с длинными надписями — фон, сетка, рамка
   /// окна: ряд → (столбец, номер картинки, функция A–D)
-  frame_tiles: HashMap<i32, Vec<(i32, u32, u8)>>,
+  frame_tiles: HashMap<i32, Vec<(i32, u32, u8, usize)>>,
   /// То же, собранное перед текущим кадром
-  last_tiles: HashMap<i32, Vec<(i32, u32, u8)>>,
+  last_tiles: HashMap<i32, Vec<(i32, u32, u8, usize)>>,
   /// Надпись (столбец, ряд, английский ключ) → клеток до границы клетки
   bordered: HashMap<(i32, i32, Vec<u8>), usize>,
   /// Надпись (столбец, ряд, английский ключ) → клеток до картинки
@@ -114,7 +114,7 @@ static STATE: LazyLock<Mutex<State>> =
   });
 
 /// Сколько найденных границ записать в лог.
-const PROBE_LIMIT: usize = 60;
+const PROBE_LIMIT: usize = 200;
 /// Предел картинок, запоминаемых на ряд за кадр.
 const PROBE_ROW_TILES: usize = 1024;
 
@@ -201,12 +201,16 @@ fn detect_border(st: &mut State, x: i32, y: i32, len: usize, english: usize, key
   let tiles = st.last_tiles.get(&y)?;
   let end = x + len as i32;
   let mut columns: HashMap<i32, Vec<(u32, u8)>> = HashMap::new();
+  // Откуда в коде игры нарисована каждая картинка: место, где игра рисует
+  // рамку окна, — отправная точка, чтобы найти и расширить ширину окна
+  let mut callers: HashMap<(i32, u32), usize> = HashMap::new();
   // Картинка 0 — пустая клетка, она стоит везде и ни о чём не говорит
   for t in tiles.iter().filter(|t| t.1 != 0 && t.0 >= x - 1 && t.0 <= end + 1) {
     let cell = columns.entry(t.0).or_default();
     if !cell.contains(&(t.1, t.2)) {
       cell.push((t.1, t.2));
     }
+    callers.entry((t.0, t.1)).or_insert(t.3);
   }
   let base: std::collections::HashSet<(u32, u8)> = (x..(x + 2).min(end))
     .filter_map(|c| columns.get(&c))
@@ -243,8 +247,11 @@ fn detect_border(st: &mut State, x: i32, y: i32, len: usize, english: usize, key
   st.bordered.insert((x, y, key.to_vec()), room);
   if first && LOG_PROBE.fetch_add(1, Ordering::Relaxed) < PROBE_LIMIT {
     let tile = columns.get(&border).and_then(|v| v.iter().find(|t| !base.contains(t)).copied());
+    let from = tile
+      .and_then(|(n, _)| callers.get(&(border, n)))
+      .map_or("-".to_string(), |&r| format!("0x{:x}", r.saturating_sub(utils::address(0))));
     log::info!(
-      "frame: border at ({x},{y}) len={len} room={room} tile={}",
+      "frame: border at ({x},{y}) len={len} room={room} tile={} from={from}",
       tile.map_or("-".to_string(), |(n, f)| format!("{}{}", f as char, n))
     );
   }
@@ -252,6 +259,7 @@ fn detect_border(st: &mut State, x: i32, y: i32, len: usize, english: usize, key
 }
 
 /// Место надписи до границы клетки (detect_border), если граница найдена.
+#[allow(dead_code)]
 pub fn border(x: i32, y: i32, key: &[u8]) -> Option<usize> {
   STATE.try_lock().ok()?.bordered.get(&(x, y, key.to_vec())).copied()
 }
@@ -277,7 +285,7 @@ pub fn own_text<R>(draw: impl FnOnce() -> R) -> R {
   out
 }
 
-fn tile(gps: usize, texpos: u32, func: u8) {
+fn tile(gps: usize, texpos: u32, func: u8, ret: usize) {
   if gps == 0 || !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off {
     return;
   }
@@ -292,7 +300,7 @@ fn tile(gps: usize, texpos: u32, func: u8) {
     if let Ok(mut st) = STATE.try_lock() {
       let row = st.frame_tiles.entry(ty).or_default();
       if row.len() < PROBE_ROW_TILES {
-        row.push((tx, texpos, func));
+        row.push((tx, texpos, func, ret));
       }
     }
   }
@@ -344,17 +352,17 @@ static ORIG_D: AtomicUsize = AtomicUsize::new(0);
 
 /// Проверка из переходника: в rcx — gps, в edx — номер картинки, как у
 /// исходной функции. Буква — какая из четырёх функций рисует.
-extern "C" fn tile_entry_a(gps: usize, texpos: u32) {
-  tile(gps, texpos, b'A');
+extern "C" fn tile_entry_a(gps: usize, texpos: u32, ret: usize) {
+  tile(gps, texpos, b'A', ret);
 }
-extern "C" fn tile_entry_b(gps: usize, texpos: u32) {
-  tile(gps, texpos, b'B');
+extern "C" fn tile_entry_b(gps: usize, texpos: u32, ret: usize) {
+  tile(gps, texpos, b'B', ret);
 }
-extern "C" fn tile_entry_c(gps: usize, texpos: u32) {
-  tile(gps, texpos, b'C');
+extern "C" fn tile_entry_c(gps: usize, texpos: u32, ret: usize) {
+  tile(gps, texpos, b'C', ret);
 }
-extern "C" fn tile_entry_d(gps: usize, texpos: u32) {
-  tile(gps, texpos, b'D');
+extern "C" fn tile_entry_d(gps: usize, texpos: u32, ret: usize) {
+  tile(gps, texpos, b'D', ret);
 }
 
 /// Переходник: сохранить временные регистры, вызвать tile_entry(rcx),
@@ -380,6 +388,9 @@ macro_rules! stub {
         "movdqu [rsp + 0x50], xmm3",
         "movdqu [rsp + 0x60], xmm4",
         "movdqu [rsp + 0x70], xmm5",
+        // Третий аргумент — адрес возврата: откуда игра рисует картинку
+        // (7 push по 8 байт и 0x80 байт ниже исходного rsp)
+        "mov r8, [rsp + 0xb8]",
         "call {entry}",
         "movdqu xmm0, [rsp + 0x20]",
         "movdqu xmm1, [rsp + 0x30]",
