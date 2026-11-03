@@ -240,11 +240,12 @@ pub fn refresh() {
   let Ok(mut buttons) = BUTTONS.try_lock() else { return };
   APPLIED.store(generation, Ordering::Relaxed);
   for b in buttons.iter_mut() {
-    let want = match translated_len(&b.label) {
-      // Надпись стоит с клетки 1, правый край — клетка N: N ≥ длина + 1
-      Some(len) => (len + 1).clamp(b.orig as usize, (b.orig + MAX_EXTRA) as usize) as u8,
-      None => b.orig,
-    };
+    // Перевода не видно — словарь как раз перезагружается (он занят, и
+    // поиск в нём на миг ничего не находит). Рамка остаётся как есть:
+    // иначе она сужалась и тут же расширялась обратно при каждой загрузке
+    let Some(len) = translated_len(&b.label) else { continue };
+    // Надпись стоит с клетки 1, правый край — клетка N: N ≥ длина + 1
+    let want = (len + 1).clamp(b.orig as usize, (b.orig + MAX_EXTRA) as usize) as u8;
     if want == b.current {
       continue;
     }
