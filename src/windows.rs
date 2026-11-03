@@ -41,6 +41,11 @@ static SITE_RIGHT: AtomicUsize = AtomicUsize::new(0);
 /// Исходные числа.
 static ORIG: AtomicUsize = AtomicUsize::new(0);
 static ORIG_RIGHT: AtomicUsize = AtomicUsize::new(0);
+/// Ряды значков у правого края окна (перо, камера…): адрес числа k в
+/// «правый край − k + 3·i» и исходное k. Нажатия по ним игра проверяет в
+/// другом коде, по старому правому краю, поэтому при росте окна вправо
+/// значки остаются на старом месте: k увеличивается на ту же прибавку.
+static ICONS: std::sync::Mutex<Vec<(usize, u8)>> = std::sync::Mutex::new(Vec::new());
 /// Границы функции, которая рисует окно: вылеты из её рамок — к этому окну.
 static FUNC_BEGIN: AtomicUsize = AtomicUsize::new(0);
 static FUNC_END: AtomicUsize = AtomicUsize::new(0);
@@ -140,7 +145,7 @@ pub unsafe fn attach() {
     // mov eax,[rsp+X] / sub eax,0xd / sub eax,0x18 / mov [rsp+Y],eax /
     // mov eax,[rsp+Y] / sub eax,N / mov [rsp+Z],eax
     let re = regex::bytes::Regex::new(
-      r"(?s-u)\x8B\x84\x24....\x83\xE8\x0D\x83\xE8(.)\x89\x84\x24....\x8B\x84\x24....\x83\xE8(.)\x89\x84\x24",
+      r"(?s-u)\x8B\x84\x24....\x83\xE8\x0D\x83\xE8(.)\x89\x84\x24(....)\x8B\x84\x24....\x83\xE8(.)\x89\x84\x24",
     )
     .unwrap();
     let found: Vec<_> = re.captures_iter(code).collect();
@@ -149,7 +154,8 @@ pub unsafe fn attach() {
       return;
     }
     let right = found[0].get(1).unwrap();
-    let m = found[0].get(2).unwrap();
+    let slot = found[0].get(2).unwrap().as_bytes().to_vec();
+    let m = found[0].get(3).unwrap();
     let n = m.as_bytes()[0] as usize;
     let r = right.as_bytes()[0] as usize;
     if !(20..=100).contains(&n) || !(4..=60).contains(&r) {
@@ -161,6 +167,23 @@ pub unsafe fn attach() {
     if let Some((b, e)) = function_of(base, pdata, site_rva) {
       FUNC_BEGIN.store(b, Ordering::Relaxed);
       FUNC_END.store(e, Ordering::Relaxed);
+      // Ряды значков: mov eax,[rsp+правый край] / (dec eax) / sub eax,k /
+      // imul ecx,[rsp+i],3 / add eax,ecx — в той же функции
+      let mut pattern = String::from(r"(?s-u)\x8B\x84\x24");
+      for byte in &slot {
+        pattern.push_str(&format!(r"\x{:02X}", byte));
+      }
+      pattern.push_str(r"(?:\xFF\xC8)?\x83\xE8(.)\x6B\x8C\x24....\x03\x03\xC1");
+      if let Ok(icons_re) = regex::bytes::Regex::new(&pattern) {
+        let func = &code[b - rva..(e - rva).min(code.len())];
+        let mut icons = ICONS.lock().unwrap();
+        for c in icons_re.captures_iter(func) {
+          let k = c.get(1).unwrap();
+          let at = base + b + k.start();
+          icons.push((at, k.as_bytes()[0]));
+          log::info!("windows: unit sheet icon row at 0x{:x}, offset {}", b + k.start(), k.as_bytes()[0]);
+        }
+      }
     }
     ORIG.store(n, Ordering::Relaxed);
     SITE.store(base + site_rva, Ordering::Relaxed);
@@ -206,7 +229,11 @@ pub fn refresh() {
   unsafe {
     // Сначала отступ правого края, потом ширина: между двумя записями окно
     // на один кадр сдвинется, но не схлопнется
-    let ok = os::write_byte(site_right, (orig_right - extra) as u8) && os::write_byte(site, (orig + extra) as u8);
+    let mut ok = os::write_byte(site_right, (orig_right - extra) as u8) && os::write_byte(site, (orig + extra) as u8);
+    // Значки у правого края — на старое место, где игра ждёт по ним нажатий
+    for &(at, k) in ICONS.lock().unwrap().iter() {
+      ok &= os::write_byte(at, (k as usize + extra).min(127) as u8);
+    }
     if ok {
       log::info!("windows: unit sheet width {} -> {}, grows to the right", orig + 1, orig + extra + 1);
     }
