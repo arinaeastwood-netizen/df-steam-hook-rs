@@ -21,6 +21,7 @@ mod search;
 mod textinput;
 mod utils;
 mod watchdog;
+mod windows;
 mod wrap;
 
 use log::{debug, error, info};
@@ -75,6 +76,8 @@ extern "C" fn attach() {
     unsafe { wrap::attach() };
     // Кнопки фиксированной ширины: рамка под длину перевода (buttons.rs)
     unsafe { buttons::attach() };
+    // Окна: ширина под русский текст по измеренным границам (windows.rs)
+    unsafe { windows::attach() };
     align::start();
   }
 }

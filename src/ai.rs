@@ -377,6 +377,8 @@ pub struct Experiments {
   pub wrap_off: bool,
   /// Аварийный выключатель расширения кнопок под перевод (buttons.rs)
   pub buttons_off: bool,
+  /// Аварийный выключатель расширения окон под перевод (windows.rs)
+  pub windows_off: bool,
   pub screen_probe: bool,
 }
 
@@ -394,6 +396,7 @@ pub static EXPERIMENTS: LazyLock<Experiments> = LazyLock::new(|| {
     search_ru_off: has("search_ru_off"),
     wrap_off: has("wrap_off"),
     buttons_off: has("buttons_off"),
+    windows_off: has("windows_off"),
     screen_probe: has("screen_probe"),
   }
 });
@@ -516,7 +519,7 @@ pub fn start() {
 
   log::info!("ai: started, dictionary {PATH_AI_DICTIONARY}, misses {PATH_AI_MISSES}");
   log::info!(
-    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, search_ru_off={}, wrap_off={}, buttons_off={}, screen_probe={}",
+    "ai: experiments: addst_flag_off={}, cstr_plus_off={}, colored_off={}, flow_off={}, english={}, fit_off={}, align_off={}, search_ru_off={}, wrap_off={}, buttons_off={}, windows_off={}, screen_probe={}",
     EXPERIMENTS.addst_flag_off,
     EXPERIMENTS.cstr_plus_off,
     EXPERIMENTS.colored_off,
@@ -527,6 +530,7 @@ pub fn start() {
     EXPERIMENTS.search_ru_off,
     EXPERIMENTS.wrap_off,
     EXPERIMENTS.buttons_off,
+    EXPERIMENTS.windows_off,
     EXPERIMENTS.screen_probe
   );
 }
@@ -685,6 +689,8 @@ fn plain_or_miss(key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<
 pub fn screen(gps: usize, key: &[u8], plain: fn(&[u8]) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
   // Рамки кнопок фиксированной ширины — под перевод их надписей (buttons.rs)
   crate::buttons::refresh();
+  // Окна — под русский текст (windows.rs)
+  crate::windows::refresh();
   note_gender(key);
   // Строка русского текста, который игра сама перенесла по ширине окна
   // (wrap.rs): уже переведена, выводится как есть

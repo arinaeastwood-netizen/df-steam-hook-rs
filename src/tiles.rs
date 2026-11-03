@@ -243,6 +243,11 @@ fn detect_border(st: &mut State, x: i32, y: i32, len: usize, english: usize, key
   })?;
   let room = (border - x) as usize;
 
+  // Окно, которое рисует эту границу, может вырасти под текст (windows.rs)
+  if let Some(&from) = columns.get(&border).and_then(|v| v.iter().find(|t| !base.contains(t))).and_then(|t| callers.get(&(border, t.0))) {
+    crate::windows::overflow(from.saturating_sub(utils::address(0)), len - room);
+  }
+
   let first = !st.bordered.contains_key(&(x, y, key.to_vec()));
   st.bordered.insert((x, y, key.to_vec()), room);
   if first && LOG_PROBE.fetch_add(1, Ordering::Relaxed) < PROBE_LIMIT {
@@ -353,58 +358,22 @@ static ORIG_D: AtomicUsize = AtomicUsize::new(0);
 /// Проверка из переходника: в rcx — gps, в edx — номер картинки, как у
 /// исходной функции. Буква — какая из четырёх функций рисует.
 extern "C" fn tile_entry_a(gps: usize, texpos: u32, ret: usize, stack: usize) {
-  frame_source(gps, ret, stack);
+  let _ = stack;
   tile(gps, texpos, b'A', ret);
 }
 extern "C" fn tile_entry_b(gps: usize, texpos: u32, ret: usize, stack: usize) {
-  frame_source(gps, ret, stack);
+  let _ = stack;
   tile(gps, texpos, b'B', ret);
 }
 extern "C" fn tile_entry_c(gps: usize, texpos: u32, ret: usize, stack: usize) {
-  frame_source(gps, ret, stack);
+  let _ = stack;
   tile(gps, texpos, b'C', ret);
 }
 extern "C" fn tile_entry_d(gps: usize, texpos: u32, ret: usize, stack: usize) {
-  frame_source(gps, ret, stack);
+  let _ = stack;
   tile(gps, texpos, b'D', ret);
 }
 
-/// Диагностика расширения окон (52.05). Рамку окна дварфа рисует цикл в
-/// 0x14edd0–0x14f0c6: столбец [rsp+0xc0] от [rsp+0x140c] до [rsp+0x1410],
-/// ряд [rsp+0xb4] от [rsp+0xdb0] до [rsp+0xb94]; правый край считается
-/// от глобальной переменной (0x2335a48) минус число. Здесь, пока цикл
-/// рисует, читаются его границы и сама переменная — по ним станет ясно,
-/// какое число менять, чтобы окно стало шире. Каждый новый набор границ
-/// пишется в лог один раз.
-fn frame_source(gps: usize, ret: usize, stack: usize) {
-  const FRAME_LOOP: std::ops::Range<usize> = 0x14edd0..0x14f0c6;
-  if stack == 0 || gps == 0 {
-    return;
-  }
-  let rva = ret.wrapping_sub(utils::address(0));
-  if !FRAME_LOOP.contains(&rva) {
-    return;
-  }
-  let rd = |off: usize| unsafe { std::ptr::read_unaligned((stack + off) as *const i32) };
-  let x1 = rd(0x140c);
-  let x2 = rd(0x1410);
-  let y1 = rd(0xdb0);
-  let y2 = rd(0xb94);
-  let global = unsafe { std::ptr::read_unaligned(utils::address(0x2335a48) as *const i32) };
-  let global2 = unsafe { std::ptr::read_unaligned(utils::address(0x2335a44) as *const i32) };
-  let key = (x1, x2, y1, y2, global);
-  let Ok(mut seen) = FRAME_SEEN.try_lock() else { return };
-  if seen.contains(&key) || seen.len() >= 40 {
-    return;
-  }
-  seen.push(key);
-  let (cx, cy) = ai::cursor(gps);
-  log::info!(
-    "frame-src: loop x {x1}..{x2} y {y1}..{y2} global(0x2335a48)={global} global(0x2335a44)={global2} at ({cx},{cy}) from=0x{rva:x}"
-  );
-}
-
-static FRAME_SEEN: LazyLock<Mutex<Vec<(i32, i32, i32, i32, i32)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Переходник: сохранить временные регистры, вызвать tile_entry(rcx),
 /// восстановить регистры и прыгнуть в исходную функцию.
