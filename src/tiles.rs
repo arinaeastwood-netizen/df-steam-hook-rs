@@ -46,12 +46,11 @@ static ROWS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::
 
 /// Отладка: сколько строк уже записано в лог (не больше 40 каждого вида).
 static LOG_WATCH: AtomicUsize = AtomicUsize::new(0);
-/// Диагностика рамок: сколько надписей уже разобрано в логе.
+/// Сколько найденных границ уже записано в лог.
 static LOG_PROBE: AtomicUsize = AtomicUsize::new(0);
-/// Диагностика рамок: ряды, где хоть раз была длинная надпись. В отличие
-/// от ROWS не сбрасываются с кадром — так в разбор попадает всё, что
-/// игра рисует на ряду за кадр, и до надписи, и после.
-static PROBE_ROWS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+/// Ряды с длинными надписями в прошлом кадре: картинки на них
+/// запоминаются весь кадр — и до надписи, и после (detect_border).
+static PREV_ROWS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static LOG_HIT: AtomicUsize = AtomicUsize::new(0);
 
 fn row_bit(y: i32) -> Option<(usize, u64)> {
@@ -89,15 +88,13 @@ const OVERLAY_WINDOW: std::time::Duration = std::time::Duration::from_millis(40)
 struct State {
   /// Надписи этого кадра, которым может не хватить места: ряд → надписи
   spans: HashMap<i32, Vec<Span>>,
-  /// Диагностика рамок: картинки на рядах с длинными надписями, от
-  /// последней надписи прошлого кадра до первой этого — то есть всё, что
-  /// игра рисует перед текстом (фон, сетка, рамка окна): ряд →
-  /// (столбец, номер картинки, функция A–D)
+  /// Картинки за кадр на рядах с длинными надписями — фон, сетка, рамка
+  /// окна: ряд → (столбец, номер картинки, функция A–D)
   frame_tiles: HashMap<i32, Vec<(i32, u32, u8)>>,
   /// То же, собранное перед текущим кадром
   last_tiles: HashMap<i32, Vec<(i32, u32, u8)>>,
-  /// Диагностика рамок: надписи, уже разобранные в логе
-  probed: Vec<(i32, i32)>,
+  /// Надпись (столбец, ряд, английский ключ) → клеток до границы клетки
+  bordered: HashMap<(i32, i32, Vec<u8>), usize>,
   /// Надпись (столбец, ряд, английский ключ) → клеток до картинки
   covered: HashMap<(i32, i32, Vec<u8>), usize>,
   /// Отладка: надписи, уже записанные в лог
@@ -110,21 +107,21 @@ static STATE: LazyLock<Mutex<State>> =
       spans: HashMap::new(),
       frame_tiles: HashMap::new(),
       last_tiles: HashMap::new(),
-      probed: Vec::new(),
+      bordered: HashMap::new(),
       covered: HashMap::new(),
       logged: Vec::new(),
     })
   });
 
-/// Сколько надписей разобрать в логе диагностики рамок.
-const PROBE_LIMIT: usize = 300;
+/// Сколько найденных границ записать в лог.
+const PROBE_LIMIT: usize = 60;
 /// Предел картинок, запоминаемых на ряд за кадр.
 const PROBE_ROW_TILES: usize = 1024;
 
 /// Новый кадр: надписи прошлого кадра забываются (fit.rs, смена кадра).
 pub fn next_frame() {
-  for r in &ROWS {
-    r.store(0, Ordering::Relaxed);
+  for (r, prev) in ROWS.iter().zip(PREV_ROWS.iter()) {
+    prev.store(r.swap(0, Ordering::Relaxed), Ordering::Relaxed);
   }
   if let Ok(mut st) = STATE.try_lock() {
     st.spans.clear();
@@ -173,8 +170,10 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
       at,
     });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
-    PROBE_ROWS[i].fetch_or(bit, Ordering::Relaxed);
-    probe(&mut st, x, y, len, english_len, key);
+    if st.bordered.len() > 4096 {
+      st.bordered.clear();
+    }
+    detect_border(&mut st, x, y, len, english_len, key);
     if !known && !st.logged.contains(&(x, y)) && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 60 {
       st.logged.push((x, y));
       log::info!("tiles: watch ({x},{y}) len={len} english={english_len}");
@@ -182,53 +181,79 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
   }
 }
 
-/// Диагностика рамок (ничего не меняет на экране). Для надписи длиннее
-/// английской — что игра нарисовала перед текстом на её ряду: картинки
-/// по столбцам от начала надписи до её конца и чуть дальше. Фон под
-/// английской частью надписи — «подложка»; первая картинка правее
-/// английской части, которой нет в подложке, — возможная граница клетки
-/// (линия сетки, рамка окна). В лог пишется и разбор, и догадка, а хук
-/// пока ею не пользуется: по этой записи настраивается определение границ.
-fn probe(st: &mut State, x: i32, y: i32, len: usize, english: usize, key: &[u8]) {
-  if st.probed.contains(&(x, y)) || LOG_PROBE.load(Ordering::Relaxed) >= PROBE_LIMIT {
-    return;
-  }
-  let Some(tiles) = st.last_tiles.get(&y) else { return };
+/// Граница клетки по картинкам, которые игра нарисовала на ряду надписи
+/// за прошлый кадр (рамки, сетку и фон игра рисует до текста, поэтому
+/// «картинка поверх надписи» их не ловит).
+///
+/// По записи с экрана (52.05, окно дварфа): под надписью лежит подложка
+/// окна (B104335), правый край окна — отдельная картинка в одну клетку
+/// (B104336), линия между колонками — картинка поверх подложки (A104812);
+/// за окном — пустые клетки. Отсюда правило без привязки к номерам:
+///
+///   подложка — картинки под первыми клетками надписи;
+///   граница — первая клетка правее начала надписи, где есть картинка не
+///   из подложки, а в соседних клетках слева и справа таких картинок нет
+///   (одиночная вертикальная линия). Горизонтальные полосы и значки из
+///   нескольких клеток сюда не попадают: у них соседи тоже не из подложки.
+///
+/// Место надписи — клеток до границы.
+fn detect_border(st: &mut State, x: i32, y: i32, len: usize, english: usize, key: &[u8]) -> Option<usize> {
+  let tiles = st.last_tiles.get(&y)?;
   let end = x + len as i32;
-  let english_end = x + english as i32;
-  let near: Vec<&(i32, u32, u8)> = tiles.iter().filter(|t| t.0 >= x - 2 && t.0 <= end + 2).collect();
-  if near.is_empty() {
-    return;
-  }
-  st.probed.push((x, y));
-  LOG_PROBE.fetch_add(1, Ordering::Relaxed);
-
-  // Подложка: картинки под английской частью надписи
-  let base: std::collections::HashSet<(u32, u8)> =
-    near.iter().filter(|t| t.0 >= x && t.0 < english_end).map(|t| (t.1, t.2)).collect();
-  let border = near
-    .iter()
-    .filter(|t| t.0 >= english_end && t.0 < end && !base.contains(&(t.1, t.2)))
-    .map(|t| t.0)
-    .min();
-
-  // Разбор по столбцам: «столбец:функция номер,…»
-  let mut columns: std::collections::BTreeMap<i32, Vec<String>> = std::collections::BTreeMap::new();
-  for t in &near {
+  let mut columns: HashMap<i32, Vec<(u32, u8)>> = HashMap::new();
+  // Картинка 0 — пустая клетка, она стоит везде и ни о чём не говорит
+  for t in tiles.iter().filter(|t| t.1 != 0 && t.0 >= x - 1 && t.0 <= end + 1) {
     let cell = columns.entry(t.0).or_default();
-    let item = format!("{}{}", t.2 as char, t.1);
-    if !cell.contains(&item) {
-      cell.push(item);
+    if !cell.contains(&(t.1, t.2)) {
+      cell.push((t.1, t.2));
     }
   }
-  let layout: Vec<String> = columns.iter().map(|(c, v)| format!("{}:{}", c - x, v.join(","))).collect();
-  let text = String::from_utf8_lossy(key);
-  let text: String = text.chars().take(40).collect();
-  log::info!(
-    "frame: ({x},{y}) len={len} english={english} border={} text=\"{text}\" tiles {}",
-    border.map_or("-".to_string(), |b| format!("{}", b - x)),
-    layout.join(" ")
-  );
+  let base: std::collections::HashSet<(u32, u8)> = (x..(x + 2).min(end))
+    .filter_map(|c| columns.get(&c))
+    .flatten()
+    .copied()
+    .collect();
+  if base.is_empty() {
+    return None;
+  }
+  let foreign = |c: i32| -> bool { columns.get(&c).is_some_and(|v| v.iter().any(|t| !base.contains(t))) };
+  let border = (x + 2..end).find(|&c| {
+    if !foreign(c) || foreign(c - 1) || foreign(c + 1) {
+      return false;
+    }
+    let room = (c - x) as usize;
+    if room >= english {
+      return true;
+    }
+    // Место меньше английской длины — надпись сдвинута вправо русским
+    // словом перед ней. Тогда граница — только настоящий край: за ней
+    // подложка окна кончается (правый край окна), или линию рисует другая
+    // функция, поверх подложки (линия между колонками). Полоса-подсветка
+    // под надписью тоже кончается картинкой-краем, но подложка окна за ней
+    // продолжается — это не край
+    let tile_func = columns.get(&c).and_then(|v| v.iter().find(|t| !base.contains(t))).map(|t| t.1);
+    let other_func = tile_func.is_some_and(|f| base.iter().all(|b| b.1 != f));
+    let after = columns.get(&(c + 1));
+    let base_ends = after.map_or(true, |v| !v.iter().any(|t| base.contains(t)));
+    other_func || base_ends
+  })?;
+  let room = (border - x) as usize;
+
+  let first = !st.bordered.contains_key(&(x, y, key.to_vec()));
+  st.bordered.insert((x, y, key.to_vec()), room);
+  if first && LOG_PROBE.fetch_add(1, Ordering::Relaxed) < PROBE_LIMIT {
+    let tile = columns.get(&border).and_then(|v| v.iter().find(|t| !base.contains(t)).copied());
+    log::info!(
+      "frame: border at ({x},{y}) len={len} room={room} tile={}",
+      tile.map_or("-".to_string(), |(n, f)| format!("{}{}", f as char, n))
+    );
+  }
+  Some(room)
+}
+
+/// Место надписи до границы клетки (detect_border), если граница найдена.
+pub fn border(x: i32, y: i32, key: &[u8]) -> Option<usize> {
+  STATE.try_lock().ok()?.bordered.get(&(x, y, key.to_vec())).copied()
 }
 
 /// Сколько клеток у надписи до картинки, которая её закрывает (если
@@ -262,8 +287,8 @@ fn tile(gps: usize, texpos: u32, func: u8) {
   }
   let (tx, ty) = ai::cursor(gps);
   let Some((i, bit)) = row_bit(ty) else { return };
-  // Диагностика рамок: всё, что нарисовано на ряду за кадр
-  if PROBE_ROWS[i].load(Ordering::Relaxed) & bit != 0 && LOG_PROBE.load(Ordering::Relaxed) < PROBE_LIMIT {
+  // Всё, что нарисовано за кадр на рядах с длинными надписями (detect_border)
+  if (PREV_ROWS[i].load(Ordering::Relaxed) | ROWS[i].load(Ordering::Relaxed)) & bit != 0 {
     if let Ok(mut st) = STATE.try_lock() {
       let row = st.frame_tiles.entry(ty).or_default();
       if row.len() < PROBE_ROW_TILES {

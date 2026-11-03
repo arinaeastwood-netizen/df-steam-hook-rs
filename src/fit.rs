@@ -315,7 +315,16 @@ pub fn settle(gps: usize, key: &[u8], drawn: Option<&[u8]>, flow: bool, space: u
   let tile_room = match english_len {
     Some(len) => {
       crate::tiles::text(x, y, text.len(), len, key);
-      crate::tiles::room(x, y, key).filter(|&r| r >= len && r < text.len())
+      let picture = crate::tiles::room(x, y, key).filter(|&r| r >= len && r < text.len());
+      // Граница клетки (линия сетки, край окна) — место по ней, даже если
+      // оно меньше английской длины: надпись могло сдвинуть вправо более
+      // длинное русское слово перед ней («Начинающий в дисциплине» и
+      // «(отвыкла)» после него)
+      let border = crate::tiles::border(x, y, key).filter(|&r| r >= 2 && r < text.len());
+      match (picture, border) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+      }
     }
     None => None,
   };
