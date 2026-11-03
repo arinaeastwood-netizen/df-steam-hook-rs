@@ -6,16 +6,22 @@
 //!   правый край = [rsp+0xae08] − 0xd − 0x18
 //!   левый край  = правый край − 0x3c        ← ширина окна, 61 клетка
 //!
-//! Колонки, линия между ними и текст отсчитываются от этих краёв. Хук
-//! уменьшает «правый край − 60» до «правый край − 60 − N»: окно растёт
-//! влево, на карту, и обе колонки получают место. Правый край, верх и
-//! низ не меняются.
+//! Окно растёт ВПРАВО: правый край сдвигается на N клеток (0x18 → 0x18−N),
+//! а ширина увеличивается на те же N (0x3c → 0x3c+N), так что левый край
+//! стоит на месте. Нажатия мышью игра проверяет в другом коде, по своей
+//! старой раскладке: при росте влево вкладки, имя и портрет съезжали и
+//! щелчок попадал не туда. Всё, что отсчитывается от левого края, —
+//! вкладки, заголовок, левая колонка — теперь не двигается. Линия между
+//! колонками отсчитывается от обоих краёв и уходит на N/2 вправо: обе
+//! колонки получают по половине прибавки.
 //!
-//! N хук берёт из измерения, без догадок: границы клеток (tiles.rs,
-//! detect_border) показывают, на сколько русский текст вылезает за край
-//! окна или за линию между колонками. Каждая колонка получает половину
-//! прибавки, поэтому N = 2 × наибольший вылет + 2 клетки запаса. Окно
-//! только растёт — до MAX_EXTRA клеток.
+//! N берётся из измерения: границы клеток (tiles.rs, detect_border)
+//! показывают, на сколько русский текст вылезает за край окна или за
+//! линию между колонками. Измерения собираются полсекунды с первого
+//! вылета, после чего окно расширяется ОДИН раз: N = 2 × наибольший вылет
+//! + 2 клетки запаса, не больше MAX_EXTRA. Дальше ширина не меняется до
+//! перезапуска игры: в 0.28.0 окно расширялось по замерам, сделанным во
+//! время перестройки после прошлого расширения, и раздувалось до 101 клетки.
 //!
 //! Место формулы находится в коде по её байтам, как кнопки. Не нашлось
 //! (другая версия игры) — окно не меняется. Аварийный выключатель —
@@ -23,27 +29,30 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Предел расширения, клеток.
-const MAX_EXTRA: usize = 40;
+/// Предел расширения, клеток: правый край не может уйти дальше 0x18
+/// клеток (до края, где у игры начинается своя полоса).
+const MAX_EXTRA: usize = 20;
+/// Сколько собирать замеры с первого вылета, мс.
+const COLLECT_MS: usize = 500;
 
-/// Адрес числа 0x3c в «sub eax, 0x3c» (0 — не найдено).
+/// Адрес числа 0x3c (ширина) и 0x18 (отступ правого края); 0 — не найдено.
 static SITE: AtomicUsize = AtomicUsize::new(0);
-/// Исходное число.
+static SITE_RIGHT: AtomicUsize = AtomicUsize::new(0);
+/// Исходные числа.
 static ORIG: AtomicUsize = AtomicUsize::new(0);
+static ORIG_RIGHT: AtomicUsize = AtomicUsize::new(0);
 /// Границы функции, которая рисует окно: вылеты из её рамок — к этому окну.
 static FUNC_BEGIN: AtomicUsize = AtomicUsize::new(0);
 static FUNC_END: AtomicUsize = AtomicUsize::new(0);
-/// Нужная прибавка по измерениям и уже применённая.
-static WANT: AtomicUsize = AtomicUsize::new(0);
-static APPLIED: AtomicUsize = AtomicUsize::new(0);
-/// Когда прибавка применена (мс от запуска): первые кадры после этого
-/// измерения ещё по старой рамке, их вылеты не считаются.
-static APPLIED_AT: AtomicUsize = AtomicUsize::new(0);
-const SETTLE_MS: usize = 300;
+/// Наибольший вылет за время сбора, начало сбора (мс от запуска, 0 — не
+/// начат) и применённая прибавка (usize::MAX — ещё нет).
+static MAX_OVERFLOW: AtomicUsize = AtomicUsize::new(0);
+static COLLECT_FROM: AtomicUsize = AtomicUsize::new(0);
+static APPLIED: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 fn now_ms() -> usize {
   static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
-  START.elapsed().as_millis() as usize
+  START.elapsed().as_millis().max(1) as usize
 }
 
 #[cfg(target_os = "windows")]
@@ -131,7 +140,7 @@ pub unsafe fn attach() {
     // mov eax,[rsp+X] / sub eax,0xd / sub eax,0x18 / mov [rsp+Y],eax /
     // mov eax,[rsp+Y] / sub eax,N / mov [rsp+Z],eax
     let re = regex::bytes::Regex::new(
-      r"(?s-u)\x8B\x84\x24....\x83\xE8\x0D\x83\xE8\x18\x89\x84\x24....\x8B\x84\x24....\x83\xE8(.)\x89\x84\x24",
+      r"(?s-u)\x8B\x84\x24....\x83\xE8\x0D\x83\xE8(.)\x89\x84\x24....\x8B\x84\x24....\x83\xE8(.)\x89\x84\x24",
     )
     .unwrap();
     let found: Vec<_> = re.captures_iter(code).collect();
@@ -139,12 +148,16 @@ pub unsafe fn attach() {
       log::info!("windows: unit sheet width formula found {} times, window is left as is", found.len());
       return;
     }
-    let m = found[0].get(1).unwrap();
+    let right = found[0].get(1).unwrap();
+    let m = found[0].get(2).unwrap();
     let n = m.as_bytes()[0] as usize;
-    if !(20..=100).contains(&n) {
+    let r = right.as_bytes()[0] as usize;
+    if !(20..=100).contains(&n) || !(4..=60).contains(&r) {
       return;
     }
     let site_rva = rva + m.start();
+    ORIG_RIGHT.store(r, Ordering::Relaxed);
+    SITE_RIGHT.store(base + rva + right.start(), Ordering::Relaxed);
     if let Some((b, e)) = function_of(base, pdata, site_rva) {
       FUNC_BEGIN.store(b, Ordering::Relaxed);
       FUNC_END.store(e, Ordering::Relaxed);
@@ -158,42 +171,44 @@ pub unsafe fn attach() {
 /// Вылет текста за край окна или за линию колонок (tiles.rs): from — откуда
 /// в коде игры нарисована граница, overflow — на сколько клеток не хватило.
 pub fn overflow(from_rva: usize, overflow: usize) {
-  if SITE.load(Ordering::Relaxed) == 0 {
+  if SITE.load(Ordering::Relaxed) == 0 || APPLIED.load(Ordering::Relaxed) != usize::MAX {
     return;
   }
   let (b, e) = (FUNC_BEGIN.load(Ordering::Relaxed), FUNC_END.load(Ordering::Relaxed));
   if b == 0 || from_rva < b || from_rva >= e {
     return;
   }
-  let at = APPLIED_AT.load(Ordering::Relaxed);
-  if at != 0 && now_ms() < at + SETTLE_MS {
-    return;
-  }
-  // Каждая колонка получает половину прибавки; две клетки — запас
-  let need = (2 * overflow + 2).min(MAX_EXTRA);
-  // Уже применённая прибавка: вылет измерен после неё — нужна ещё
-  let total = (APPLIED.load(Ordering::Relaxed) + need).min(MAX_EXTRA);
-  WANT.fetch_max(total, Ordering::Relaxed);
+  let _ = COLLECT_FROM.compare_exchange(0, now_ms(), Ordering::Relaxed, Ordering::Relaxed);
+  MAX_OVERFLOW.fetch_max(overflow, Ordering::Relaxed);
 }
 
-/// Применить прибавку. Основной поток, перед выводом надписи (ai::screen).
+/// Применить прибавку — один раз, когда замеры собраны. Основной поток,
+/// перед выводом надписи (ai::screen).
 pub fn refresh() {
   let site = SITE.load(Ordering::Relaxed);
-  if site == 0 {
+  let site_right = SITE_RIGHT.load(Ordering::Relaxed);
+  if site == 0 || site_right == 0 || APPLIED.load(Ordering::Relaxed) != usize::MAX {
     return;
   }
-  let want = WANT.load(Ordering::Relaxed);
-  if want <= APPLIED.load(Ordering::Relaxed) {
+  let from = COLLECT_FROM.load(Ordering::Relaxed);
+  if from == 0 || now_ms() < from + COLLECT_MS {
     return;
   }
   let orig = ORIG.load(Ordering::Relaxed);
-  let value = (orig + want).min(127) as u8;
+  let orig_right = ORIG_RIGHT.load(Ordering::Relaxed);
+  // Каждая колонка получает половину прибавки; две клетки — запас
+  let extra = (2 * MAX_OVERFLOW.load(Ordering::Relaxed) + 2).min(MAX_EXTRA).min(orig_right);
+  APPLIED.store(extra, Ordering::Relaxed);
+  if extra == 0 {
+    return;
+  }
   #[cfg(target_os = "windows")]
   unsafe {
-    if os::write_byte(site, value) {
-      log::info!("windows: unit sheet width {} -> {}", orig + 1 + APPLIED.load(Ordering::Relaxed), value as usize + 1);
-      APPLIED.store(want, Ordering::Relaxed);
-      APPLIED_AT.store(now_ms().max(1), Ordering::Relaxed);
+    // Сначала отступ правого края, потом ширина: между двумя записями окно
+    // на один кадр сдвинется, но не схлопнется
+    let ok = os::write_byte(site_right, (orig_right - extra) as u8) && os::write_byte(site, (orig + extra) as u8);
+    if ok {
+      log::info!("windows: unit sheet width {} -> {}, grows to the right", orig + 1, orig + extra + 1);
     }
   }
 }
