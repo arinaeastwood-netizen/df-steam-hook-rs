@@ -46,6 +46,12 @@ static ROWS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::
 
 /// Отладка: сколько строк уже записано в лог (не больше 40 каждого вида).
 static LOG_WATCH: AtomicUsize = AtomicUsize::new(0);
+/// Диагностика рамок: сколько надписей уже разобрано в логе.
+static LOG_PROBE: AtomicUsize = AtomicUsize::new(0);
+/// Диагностика рамок: ряды, где хоть раз была длинная надпись. В отличие
+/// от ROWS не сбрасываются с кадром — так в разбор попадает всё, что
+/// игра рисует на ряду за кадр, и до надписи, и после.
+static PROBE_ROWS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static LOG_HIT: AtomicUsize = AtomicUsize::new(0);
 
 fn row_bit(y: i32) -> Option<(usize, u64)> {
@@ -83,6 +89,15 @@ const OVERLAY_WINDOW: std::time::Duration = std::time::Duration::from_millis(40)
 struct State {
   /// Надписи этого кадра, которым может не хватить места: ряд → надписи
   spans: HashMap<i32, Vec<Span>>,
+  /// Диагностика рамок: картинки на рядах с длинными надписями, от
+  /// последней надписи прошлого кадра до первой этого — то есть всё, что
+  /// игра рисует перед текстом (фон, сетка, рамка окна): ряд →
+  /// (столбец, номер картинки, функция A–D)
+  frame_tiles: HashMap<i32, Vec<(i32, u32, u8)>>,
+  /// То же, собранное перед текущим кадром
+  last_tiles: HashMap<i32, Vec<(i32, u32, u8)>>,
+  /// Диагностика рамок: надписи, уже разобранные в логе
+  probed: Vec<(i32, i32)>,
   /// Надпись (столбец, ряд, английский ключ) → клеток до картинки
   covered: HashMap<(i32, i32, Vec<u8>), usize>,
   /// Отладка: надписи, уже записанные в лог
@@ -90,7 +105,21 @@ struct State {
 }
 
 static STATE: LazyLock<Mutex<State>> =
-  LazyLock::new(|| Mutex::new(State { spans: HashMap::new(), covered: HashMap::new(), logged: Vec::new() }));
+  LazyLock::new(|| {
+    Mutex::new(State {
+      spans: HashMap::new(),
+      frame_tiles: HashMap::new(),
+      last_tiles: HashMap::new(),
+      probed: Vec::new(),
+      covered: HashMap::new(),
+      logged: Vec::new(),
+    })
+  });
+
+/// Сколько надписей разобрать в логе диагностики рамок.
+const PROBE_LIMIT: usize = 300;
+/// Предел картинок, запоминаемых на ряд за кадр.
+const PROBE_ROW_TILES: usize = 1024;
 
 /// Новый кадр: надписи прошлого кадра забываются (fit.rs, смена кадра).
 pub fn next_frame() {
@@ -99,6 +128,7 @@ pub fn next_frame() {
   }
   if let Ok(mut st) = STATE.try_lock() {
     st.spans.clear();
+    st.last_tiles = std::mem::take(&mut st.frame_tiles);
   }
 }
 
@@ -143,11 +173,62 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
       at,
     });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
+    PROBE_ROWS[i].fetch_or(bit, Ordering::Relaxed);
+    probe(&mut st, x, y, len, english_len, key);
     if !known && !st.logged.contains(&(x, y)) && LOG_WATCH.fetch_add(1, Ordering::Relaxed) < 60 {
       st.logged.push((x, y));
       log::info!("tiles: watch ({x},{y}) len={len} english={english_len}");
     }
   }
+}
+
+/// Диагностика рамок (ничего не меняет на экране). Для надписи длиннее
+/// английской — что игра нарисовала перед текстом на её ряду: картинки
+/// по столбцам от начала надписи до её конца и чуть дальше. Фон под
+/// английской частью надписи — «подложка»; первая картинка правее
+/// английской части, которой нет в подложке, — возможная граница клетки
+/// (линия сетки, рамка окна). В лог пишется и разбор, и догадка, а хук
+/// пока ею не пользуется: по этой записи настраивается определение границ.
+fn probe(st: &mut State, x: i32, y: i32, len: usize, english: usize, key: &[u8]) {
+  if st.probed.contains(&(x, y)) || LOG_PROBE.load(Ordering::Relaxed) >= PROBE_LIMIT {
+    return;
+  }
+  let Some(tiles) = st.last_tiles.get(&y) else { return };
+  let end = x + len as i32;
+  let english_end = x + english as i32;
+  let near: Vec<&(i32, u32, u8)> = tiles.iter().filter(|t| t.0 >= x - 2 && t.0 <= end + 2).collect();
+  if near.is_empty() {
+    return;
+  }
+  st.probed.push((x, y));
+  LOG_PROBE.fetch_add(1, Ordering::Relaxed);
+
+  // Подложка: картинки под английской частью надписи
+  let base: std::collections::HashSet<(u32, u8)> =
+    near.iter().filter(|t| t.0 >= x && t.0 < english_end).map(|t| (t.1, t.2)).collect();
+  let border = near
+    .iter()
+    .filter(|t| t.0 >= english_end && t.0 < end && !base.contains(&(t.1, t.2)))
+    .map(|t| t.0)
+    .min();
+
+  // Разбор по столбцам: «столбец:функция номер,…»
+  let mut columns: std::collections::BTreeMap<i32, Vec<String>> = std::collections::BTreeMap::new();
+  for t in &near {
+    let cell = columns.entry(t.0).or_default();
+    let item = format!("{}{}", t.2 as char, t.1);
+    if !cell.contains(&item) {
+      cell.push(item);
+    }
+  }
+  let layout: Vec<String> = columns.iter().map(|(c, v)| format!("{}:{}", c - x, v.join(","))).collect();
+  let text = String::from_utf8_lossy(key);
+  let text: String = text.chars().take(40).collect();
+  log::info!(
+    "frame: ({x},{y}) len={len} english={english} border={} text=\"{text}\" tiles {}",
+    border.map_or("-".to_string(), |b| format!("{}", b - x)),
+    layout.join(" ")
+  );
 }
 
 /// Сколько клеток у надписи до картинки, которая её закрывает (если
@@ -171,7 +252,7 @@ pub fn own_text<R>(draw: impl FnOnce() -> R) -> R {
   out
 }
 
-fn tile(gps: usize) {
+fn tile(gps: usize, texpos: u32, func: u8) {
   if gps == 0 || !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off {
     return;
   }
@@ -181,6 +262,15 @@ fn tile(gps: usize) {
   }
   let (tx, ty) = ai::cursor(gps);
   let Some((i, bit)) = row_bit(ty) else { return };
+  // Диагностика рамок: всё, что нарисовано на ряду за кадр
+  if PROBE_ROWS[i].load(Ordering::Relaxed) & bit != 0 && LOG_PROBE.load(Ordering::Relaxed) < PROBE_LIMIT {
+    if let Ok(mut st) = STATE.try_lock() {
+      let row = st.frame_tiles.entry(ty).or_default();
+      if row.len() < PROBE_ROW_TILES {
+        row.push((tx, texpos, func));
+      }
+    }
+  }
   if ROWS[i].load(Ordering::Relaxed) & bit == 0 {
     return;
   }
@@ -227,9 +317,19 @@ static ORIG_B: AtomicUsize = AtomicUsize::new(0);
 static ORIG_C: AtomicUsize = AtomicUsize::new(0);
 static ORIG_D: AtomicUsize = AtomicUsize::new(0);
 
-/// Проверка из переходника: в rcx — gps, как у исходной функции.
-extern "C" fn tile_entry(gps: usize) {
-  tile(gps);
+/// Проверка из переходника: в rcx — gps, в edx — номер картинки, как у
+/// исходной функции. Буква — какая из четырёх функций рисует.
+extern "C" fn tile_entry_a(gps: usize, texpos: u32) {
+  tile(gps, texpos, b'A');
+}
+extern "C" fn tile_entry_b(gps: usize, texpos: u32) {
+  tile(gps, texpos, b'B');
+}
+extern "C" fn tile_entry_c(gps: usize, texpos: u32) {
+  tile(gps, texpos, b'C');
+}
+extern "C" fn tile_entry_d(gps: usize, texpos: u32) {
+  tile(gps, texpos, b'D');
 }
 
 /// Переходник: сохранить временные регистры, вызвать tile_entry(rcx),
@@ -237,7 +337,7 @@ extern "C" fn tile_entry(gps: usize) {
 /// На входе rsp ≡ 8 (mod 16); после 7 push — ≡ 0; 0x80 байт под xmm и
 /// теневое пространство сохраняют выравнивание для вызова.
 macro_rules! stub {
-  ($name:ident, $orig:ident) => {
+  ($name:ident, $orig:ident, $entry:ident) => {
     #[unsafe(naked)]
     unsafe extern "C" fn $name() {
       core::arch::naked_asm!(
@@ -271,17 +371,17 @@ macro_rules! stub {
         "pop rcx",
         "pop rax",
         "jmp qword ptr [rip + {orig}]",
-        entry = sym tile_entry,
+        entry = sym $entry,
         orig = sym $orig,
       )
     }
   };
 }
 
-stub!(stub_a, ORIG_A);
-stub!(stub_b, ORIG_B);
-stub!(stub_c, ORIG_C);
-stub!(stub_d, ORIG_D);
+stub!(stub_a, ORIG_A, tile_entry_a);
+stub!(stub_b, ORIG_B, tile_entry_b);
+stub!(stub_c, ORIG_C, tile_entry_c);
+stub!(stub_d, ORIG_D, tile_entry_d);
 
 static DETOURS: OnceLock<Vec<RawDetour>> = OnceLock::new();
 
@@ -342,7 +442,10 @@ pub fn attach() {
         // Адрес исходной функции — до включения перехвата
         origs[n].store(detour.trampoline() as *const () as usize, Ordering::SeqCst);
         match unsafe { detour.enable() } {
-          Ok(_) => detours.push(detour),
+          Ok(_) => {
+            log::info!("tiles: function {} at 0x{:x}", (b'A' + n as u8) as char, addr - utils::address(0));
+            detours.push(detour)
+          }
           Err(err) => log::warn!("tiles: unable to enable 0x{:x}: {err:?}", addr - utils::address(0)),
         }
       }
