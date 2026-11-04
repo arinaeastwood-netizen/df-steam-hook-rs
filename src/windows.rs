@@ -238,7 +238,28 @@ pub unsafe fn attach() {
     }
     SITE_INPUT.store(base + rva + inputs[0], Ordering::Relaxed);
     log::info!("windows: unit sheet input layout at 0x{:x}", rva + inputs[0]);
+
+    // Ширина с прошлого запуска: окно сразу открывается расширенным
+    if let Some(extra) = saved_extra() {
+      MAX_OVERFLOW.store(extra.saturating_sub(2) / 2, Ordering::Relaxed);
+      COLLECT_FROM.store(1, Ordering::Relaxed);
+      log::info!("windows: unit sheet extra width {extra} from the last game");
+    }
   }
+}
+
+/// Файл с прибавкой ширины: окно запоминает ширину между запусками игры.
+const SAVED: &str = "./dfint-data/ai/windows.txt";
+
+fn saved_extra() -> Option<usize> {
+  let text = std::fs::read_to_string(SAVED).ok()?;
+  let line = text.lines().find(|l| l.trim_start().starts_with("unit_sheet="))?;
+  let n: usize = line.trim().trim_start_matches("unit_sheet=").parse().ok()?;
+  (n > 0 && n <= MAX_EXTRA).then_some(n)
+}
+
+fn save_extra(extra: usize) {
+  let _ = std::fs::write(SAVED, format!("# Прибавка ширины окна дварфа, клеток (хук, windows.rs)\nunit_sheet={extra}\n"));
 }
 
 /// Адрес из функции, которая рисует окно дварфа.
@@ -287,6 +308,9 @@ pub fn refresh() {
     let ok = os::write_byte(input, (-((orig + extra) as i32)) as i8 as u8) && os::write_byte(site, (orig + extra) as u8);
     if ok {
       log::info!("windows: unit sheet width {} -> {}, grows to the left", orig + 1, orig + extra + 1);
+      if saved_extra() != Some(extra) {
+        save_extra(extra);
+      }
     }
   }
 }
