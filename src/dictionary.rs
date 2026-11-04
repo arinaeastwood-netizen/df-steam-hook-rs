@@ -189,6 +189,19 @@ pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
 /// базовый. На экране перевод ничего в логике игры не меняет, поэтому
 /// здесь действуют и новые переводы, и ручные правки.
 pub fn lookup_all(key: &[u8]) -> Option<Vec<u8>> {
+  // Режим оригинального текста: ручные правки и постоянные переводы SkadDF
+  // (ключ с приставкой 0x1E) главнее словаря сообщества. Иначе на экране
+  // их не видно для строк, которые есть и у сообщества: « (Rusty)»
+  // показывалось как «(Подзабыл)», хотя в нашем словаре «(отвык)».
+  // Остальные наши переводы, как и раньше, — после словаря сообщества
+  if ai::EXPERIMENTS.english {
+    let mut priority = Vec::with_capacity(key.len() + 1);
+    priority.push(0x1e);
+    priority.extend_from_slice(key);
+    if let Some(value) = ai::lookup(&priority) {
+      return Some(value);
+    }
+  }
   if let Some(value) = community(key, false) {
     return Some(value);
   }
