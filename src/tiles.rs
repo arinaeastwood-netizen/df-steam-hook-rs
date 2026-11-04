@@ -73,6 +73,9 @@ struct Span {
   background: bool,
   /// Ближайшая картинка поверх надписи в этом проходе (до фона)
   candidate: Option<usize>,
+  /// Откуда в коде игры нарисована эта картинка (адрес возврата): по нему
+  /// находится, от чего игра отсчитывает столбец значков
+  candidate_from: usize,
   /// Когда надпись выведена: картинка считается закрывающей её, только
   /// если нарисована сразу после — в том же проходе отрисовки. Фон
   /// следующего кадра игра рисует раньше текста, но уже через десятки
@@ -141,17 +144,21 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
     let at = std::time::Instant::now();
     // Та же надпись на новом кадре: картинка, найденная в прошлом проходе
     // поверх неё (до фона следующего кадра), запоминается
-    let mut done: Option<(Vec<u8>, usize)> = None;
+    let mut done: Option<(Vec<u8>, usize, usize)> = None;
     if let Some(row) = st.spans.get(&y) {
       if let Some(old) = row.iter().find(|s| s.x == x) {
         if let Some(room) = old.candidate {
-          done = Some((old.key.clone(), room));
+          done = Some((old.key.clone(), room, old.candidate_from));
         }
       }
     }
-    if let Some((old_key, room)) = done {
-      if !st.covered.contains_key(&(x, y, old_key.clone())) && LOG_HIT.fetch_add(1, Ordering::Relaxed) < 40 {
-        log::info!("tiles: picture covers text at ({x},{y}) -> room {room}");
+    if let Some((old_key, room, from)) = done {
+      if !st.covered.contains_key(&(x, y, old_key.clone())) && LOG_HIT.fetch_add(1, Ordering::Relaxed) < 80 {
+        let text: String = String::from_utf8_lossy(&old_key).chars().take(30).collect();
+        log::info!(
+          "tiles: picture covers text at ({x},{y}) -> room {room} from=0x{:x} text=\"{text}\"",
+          from.saturating_sub(utils::address(0))
+        );
       }
       let e = st.covered.entry((x, y, old_key)).or_insert(room);
       if room < *e {
@@ -167,6 +174,7 @@ pub fn text(x: i32, y: i32, len: usize, english_len: usize, key: &[u8]) {
       english: english_len,
       background: false,
       candidate: None,
+      candidate_from: 0,
       at,
     });
     ROWS[i].fetch_or(bit, Ordering::Relaxed);
@@ -362,6 +370,9 @@ fn tile(gps: usize, texpos: u32, func: u8, ret: usize) {
         // строго больше английской длины: значок вплотную за английским
         // текстом без пробела не бывает
         let room = (tx - s.x - 1) as usize;
+        if s.candidate.is_none_or(|c| room < c) {
+          s.candidate_from = ret;
+        }
         s.candidate = Some(s.candidate.map_or(room, |c| c.min(room)));
       }
     }
