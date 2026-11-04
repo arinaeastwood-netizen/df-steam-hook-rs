@@ -174,6 +174,25 @@ pub unsafe fn attach() {
         pattern.push_str(&format!(r"\x{:02X}", byte));
       }
       pattern.push_str(r"(?:\xFF\xC8)?\x83\xE8(.)\x6B\x8C\x24....\x03\x03\xC1");
+      // Перо, камера и стрелка «перейти» в правом верхнем углу: их место
+      // отсчитывается от «правый край − 3» (52.05: 0x1573c9, по записи
+      // icons: перо — этот отступ − 6, камера и стрелка — − 2)
+      let mut corner = String::from(r"(?s-u)\x8B\x84\x24");
+      for byte in &slot {
+        corner.push_str(&format!(r"\x{:02X}", byte));
+      }
+      corner.push_str(r"\x83\xE8(\x03)\x89\x84\x24");
+      if let Ok(corner_re) = regex::bytes::Regex::new(&corner) {
+        let func = &code[b - rva..(e - rva).min(code.len())];
+        let found: Vec<_> = corner_re.captures_iter(func).collect();
+        if found.len() == 1 {
+          let k = found[0].get(1).unwrap();
+          ICONS.lock().unwrap().push((base + b + k.start(), k.as_bytes()[0]));
+          log::info!("windows: unit sheet corner icons at 0x{:x}, offset {}", b + k.start(), k.as_bytes()[0]);
+        } else {
+          log::info!("windows: unit sheet corner icons found {} times, left as is", found.len());
+        }
+      }
       if let Ok(icons_re) = regex::bytes::Regex::new(&pattern) {
         let func = &code[b - rva..(e - rva).min(code.len())];
         let mut icons = ICONS.lock().unwrap();
@@ -242,7 +261,6 @@ pub fn refresh() {
     }
     if ok {
       log::info!("windows: unit sheet width {} -> {}, grows to the right", orig + 1, orig + extra + 1);
-      crate::tiles::PROBE_ICONS.store(true, Ordering::Relaxed);
     }
   }
 }
