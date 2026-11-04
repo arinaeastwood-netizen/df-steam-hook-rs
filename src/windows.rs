@@ -6,14 +6,19 @@
 //!   правый край = [rsp+0xae08] − 0xd − 0x18
 //!   левый край  = правый край − 0x3c        ← ширина окна, 61 клетка
 //!
-//! Окно растёт ВПРАВО: правый край сдвигается на N клеток (0x18 → 0x18−N),
-//! а ширина увеличивается на те же N (0x3c → 0x3c+N), так что левый край
-//! стоит на месте. Нажатия мышью игра проверяет в другом коде, по своей
-//! старой раскладке: при росте влево вкладки, имя и портрет съезжали и
-//! щелчок попадал не туда. Всё, что отсчитывается от левого края, —
-//! вкладки, заголовок, левая колонка — теперь не двигается. Линия между
-//! колонками отсчитывается от обоих краёв и уходит на N/2 вправо: обе
-//! колонки получают по половине прибавки.
+//! Окно растёт ВЛЕВО, на карту: ширина увеличивается на N клеток
+//! (0x3c → 0x3c+N), правый край стоит на месте. Нажатия мышью игра
+//! проверяет в отдельном коде (52.05: 0x1a4cd0), который считает тот же
+//! прямоугольник своей копией формулы — «правый край − 0x25, левый край
+//! = правый − 0x3c» и «низ = высота экрана − 4». Хук меняет ширину и там,
+//! поэтому вкладки, значки и переключатели остаются кликабельными там,
+//! где нарисованы. Правый край не двигается — переключатель существ в
+//! клетке и всё, что справа от окна, остаётся на месте.
+//!
+//! В 0.28.x окно росло вправо, а значки у правого края возвращались на
+//! старое место по одному — каждая такая кнопка требовала отдельной
+//! правки. Теперь раскладка для рисования и для нажатий меняется вместе.
+//! Не нашлась копия формулы для нажатий — окно не расширяется вообще.
 //!
 //! N берётся из измерения: границы клеток (tiles.rs, detect_border)
 //! показывают, на сколько русский текст вылезает за край окна или за
@@ -35,6 +40,8 @@ const MAX_EXTRA: usize = 20;
 /// Сколько собирать замеры с первого вылета, мс.
 const COLLECT_MS: usize = 500;
 
+/// Адрес числа −0x3c в копии формулы для нажатий (lea r, [r − 0x3c]).
+static SITE_INPUT: AtomicUsize = AtomicUsize::new(0);
 /// Адрес числа 0x3c (ширина) и 0x18 (отступ правого края); 0 — не найдено.
 static SITE: AtomicUsize = AtomicUsize::new(0);
 static SITE_RIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -207,6 +214,30 @@ pub unsafe fn attach() {
     ORIG.store(n, Ordering::Relaxed);
     SITE.store(base + site_rva, Ordering::Relaxed);
     log::info!("windows: unit sheet width at 0x{site_rva:x}, width {}", n + 1);
+
+    // Копия формулы для нажатий: add r, −0x25 / lea r, [r − 0x3c], и рядом
+    // низ окна «высота экрана − 4» (add r, −4). Ровно одна — иначе окно
+    // не расширяется
+    let input_re = regex::bytes::Regex::new(
+      r"(?s-u)(?:\x41)?\x83[\xC0-\xC7]\xDB(?:\x41|\x44|\x45)?\x8D(?:[\x40-\x7F]\x24|[\x40-\x7F])(\xC4)",
+    )
+    .unwrap();
+    let low4 = regex::bytes::Regex::new(r"(?s-u)\x83[\xC0-\xC7]\xFC").unwrap();
+    let inputs: Vec<usize> = input_re
+      .captures_iter(code)
+      .filter(|c| {
+        let end = c.get(0).unwrap().end();
+        low4.is_match(&code[end..(end + 30).min(code.len())])
+      })
+      .map(|c| c.get(1).unwrap().start())
+      .collect();
+    if inputs.len() != 1 {
+      log::info!("windows: unit sheet input layout found {} times, window is left as is", inputs.len());
+      SITE.store(0, Ordering::Relaxed);
+      return;
+    }
+    SITE_INPUT.store(base + rva + inputs[0], Ordering::Relaxed);
+    log::info!("windows: unit sheet input layout at 0x{:x}", rva + inputs[0]);
   }
 }
 
@@ -234,8 +265,7 @@ pub fn overflow(from_rva: usize, overflow: usize) {
 /// перед выводом надписи (ai::screen).
 pub fn refresh() {
   let site = SITE.load(Ordering::Relaxed);
-  let site_right = SITE_RIGHT.load(Ordering::Relaxed);
-  if site == 0 || site_right == 0 || APPLIED.load(Ordering::Relaxed) != usize::MAX {
+  if site == 0 || APPLIED.load(Ordering::Relaxed) != usize::MAX {
     return;
   }
   let from = COLLECT_FROM.load(Ordering::Relaxed);
@@ -243,24 +273,20 @@ pub fn refresh() {
     return;
   }
   let orig = ORIG.load(Ordering::Relaxed);
-  let orig_right = ORIG_RIGHT.load(Ordering::Relaxed);
+  let input = SITE_INPUT.load(Ordering::Relaxed);
   // Каждая колонка получает половину прибавки; две клетки — запас
-  let extra = (2 * MAX_OVERFLOW.load(Ordering::Relaxed) + 2).min(MAX_EXTRA).min(orig_right);
+  let extra = (2 * MAX_OVERFLOW.load(Ordering::Relaxed) + 2).min(MAX_EXTRA);
   APPLIED.store(extra, Ordering::Relaxed);
-  if extra == 0 {
+  if extra == 0 || input == 0 {
     return;
   }
   #[cfg(target_os = "windows")]
   unsafe {
-    // Сначала отступ правого края, потом ширина: между двумя записями окно
-    // на один кадр сдвинется, но не схлопнется
-    let mut ok = os::write_byte(site_right, (orig_right - extra) as u8) && os::write_byte(site, (orig + extra) as u8);
-    // Значки у правого края — на старое место, где игра ждёт по ним нажатий
-    for &(at, k) in ICONS.lock().unwrap().iter() {
-      ok &= os::write_byte(at, (k as usize + extra).min(127) as u8);
-    }
+    // Сначала нажатия, потом рисование: на один кадр щелчок может уйти
+    // мимо, но окно не окажется нарисованным там, где его не ждут дольше
+    let ok = os::write_byte(input, (-((orig + extra) as i32)) as i8 as u8) && os::write_byte(site, (orig + extra) as u8);
     if ok {
-      log::info!("windows: unit sheet width {} -> {}, grows to the right", orig + 1, orig + extra + 1);
+      log::info!("windows: unit sheet width {} -> {}, grows to the left", orig + 1, orig + extra + 1);
     }
   }
 }
