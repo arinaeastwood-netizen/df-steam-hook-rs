@@ -290,10 +290,35 @@ pub fn own_text<R>(draw: impl FnOnce() -> R) -> R {
   out
 }
 
+/// Диагностика значков окна дварфа: после расширения окна (windows.rs)
+/// записать, откуда в коде игры рисуются картинки в верхнем правом углу
+/// окна (перо, камера, стрелка «перейти»), — по этим адресам находится,
+/// от чего игра отсчитывает их место.
+pub static PROBE_ICONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ICON_SEEN: LazyLock<Mutex<Vec<(i32, i32, u32, usize)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn probe_icon(gps: usize, texpos: u32, func: u8, ret: usize) {
+  if !PROBE_ICONS.load(Ordering::Relaxed) || IN_TEXT.with(|f| f.get()) {
+    return;
+  }
+  let (tx, ty) = ai::cursor(gps);
+  if !(100..200).contains(&tx) || !(3..13).contains(&ty) || texpos == 0 {
+    return;
+  }
+  let rva = ret.wrapping_sub(utils::address(0));
+  let Ok(mut seen) = ICON_SEEN.try_lock() else { return };
+  if seen.len() >= 120 || seen.iter().any(|s| s.0 == tx && s.1 == ty && s.2 == texpos && s.3 == rva) {
+    return;
+  }
+  seen.push((tx, ty, texpos, rva));
+  log::info!("icons: ({tx},{ty}) tile={}{texpos} from=0x{rva:x}", func as char);
+}
+
 fn tile(gps: usize, texpos: u32, func: u8, ret: usize) {
   if gps == 0 || !ai::EXPERIMENTS.english || ai::EXPERIMENTS.fit_off {
     return;
   }
+  probe_icon(gps, texpos, func, ret);
   // Буквы выводимой надписи: шрифт игра рисует картинками
   if IN_TEXT.with(|f| f.get()) {
     return;

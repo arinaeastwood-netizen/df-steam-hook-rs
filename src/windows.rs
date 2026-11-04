@@ -236,6 +236,7 @@ pub fn refresh() {
     }
     if ok {
       log::info!("windows: unit sheet width {} -> {}, grows to the right", orig + 1, orig + extra + 1);
+      crate::tiles::PROBE_ICONS.store(true, Ordering::Relaxed);
     }
   }
 }
