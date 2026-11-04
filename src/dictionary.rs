@@ -172,28 +172,7 @@ pub fn from_community(key: &[u8]) -> bool {
 /// В режиме оригинального текста словарь сообщества пропускается — игра
 /// собирает строки по-английски, и до экрана доходит настоящий текст.
 pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
-  let value = lookup_inner(key);
-  glyph_probe(key, value.as_deref());
-  value
-}
-
-/// Диагностика «└07» (байт 0xC0) в пустом поле поиска: подстановка при
-/// сборке строки, которой нет на экране как надписи. Первые 20 случаев.
-fn glyph_probe(key: &[u8], value: Option<&[u8]>) {
-  static LOGGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-  let Some(value) = value else { return };
-  if !value.contains(&0xC0) || key.contains(&0xC0) {
-    return;
-  }
-  if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 20 {
-    return;
-  }
-  log::info!(
-    "glyph: built key={:02x?} \"{}\" -> value={:02x?}",
-    &key[..key.len().min(40)],
-    String::from_utf8_lossy(&key[..key.len().min(40)]),
-    &value[..value.len().min(40)]
-  );
+  lookup_inner(key)
 }
 
 fn lookup_inner(key: &[u8]) -> Option<Vec<u8>> {
@@ -215,13 +194,16 @@ fn lookup_inner(key: &[u8]) -> Option<Vec<u8>> {
 /// здесь действуют и новые переводы, и ручные правки.
 pub fn lookup_all(key: &[u8]) -> Option<Vec<u8>> {
   // Режим оригинального текста: ручные правки и постоянные переводы SkadDF
-  // (ключ с приставкой 0x1E) главнее словаря сообщества. Иначе на экране
+  // (ключ с приставкой 0x17) главнее словаря сообщества. Иначе на экране
   // их не видно для строк, которые есть и у сообщества: « (Rusty)»
   // показывалось как «(Подзабыл)», хотя в нашем словаре «(отвык)».
   // Остальные наши переводы, как и раньше, — после словаря сообщества
-  if ai::EXPERIMENTS.english {
+  // Приставка 0x17: 0x1E занят ключами строк цветного текста — в 0.28.1
+  // пустая строка игры находила там запись пустой строки цветного блока,
+  // и в пустых полях ввода появлялось «└07»
+  if ai::EXPERIMENTS.english && key.len() >= 2 {
     let mut priority = Vec::with_capacity(key.len() + 1);
-    priority.push(0x1e);
+    priority.push(0x17);
     priority.extend_from_slice(key);
     if let Some(value) = ai::lookup(&priority) {
       return Some(value);

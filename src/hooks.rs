@@ -398,29 +398,9 @@ fn fitted(gps: usize, key: &[u8], translated: Option<Vec<u8>>, in_flow: bool, sp
     }
     None => translated,
   };
-  odd_glyph_probe(gps, key, out.as_deref(), space);
   out
 }
 
-/// Диагностика «└07» в пустом поле поиска: что за надпись игра выводит и
-/// во что её превращает хук. Символ «└» — байт 0xC0 в шрифте игры. Пишется
-/// в лог первые 20 таких надписей.
-fn odd_glyph_probe(gps: usize, key: &[u8], out: Option<&[u8]>, space: u32) {
-  static LOGGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-  let Some(out) = out else { return };
-  if !out.contains(&0xC0) || key.contains(&0xC0) {
-    return;
-  }
-  if LOGGED.fetch_add(1, Ordering::Relaxed) >= 20 {
-    return;
-  }
-  let (x, y) = crate::ai::cursor(gps);
-  log::info!(
-    "glyph: ({x},{y}) space={space} key={:02x?} -> out={:02x?}",
-    key,
-    &out[..out.len().saturating_sub(1).min(40)]
-  );
-}
 
 #[cfg_attr(target_os = "windows", hook(by_offset))]
 #[cfg_attr(target_os = "linux", hook(by_symbol))]
