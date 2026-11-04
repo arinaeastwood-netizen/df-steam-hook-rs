@@ -298,16 +298,21 @@ pub static PROBE_ICONS: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 static ICON_SEEN: LazyLock<Mutex<Vec<(i32, i32, u32, usize)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 fn probe_icon(gps: usize, texpos: u32, func: u8, ret: usize) {
-  if !PROBE_ICONS.load(Ordering::Relaxed) || IN_TEXT.with(|f| f.get()) {
-    return;
-  }
-  let (tx, ty) = ai::cursor(gps);
-  if !(100..200).contains(&tx) || !(3..13).contains(&ty) || texpos == 0 {
+  if !PROBE_ICONS.load(Ordering::Relaxed) || IN_TEXT.with(|f| f.get()) || texpos == 0 {
     return;
   }
   let rva = ret.wrapping_sub(utils::address(0));
+  // Только картинки из функции окна дварфа и не из цикла его рамки
+  if !crate::windows::in_window_code(rva) || (0x14edd0..0x14f0c6).contains(&rva) {
+    return;
+  }
+  let (tx, ty) = ai::cursor(gps);
+  if !(110..175).contains(&tx) || !(4..12).contains(&ty) {
+    return;
+  }
   let Ok(mut seen) = ICON_SEEN.try_lock() else { return };
-  if seen.len() >= 120 || seen.iter().any(|s| s.0 == tx && s.1 == ty && s.2 == texpos && s.3 == rva) {
+  // Каждое место в коде — один раз, с первой клеткой и картинкой
+  if seen.len() >= 60 || seen.iter().any(|s| s.3 == rva && (s.0 - tx).abs() < 3 && s.1 == ty) {
     return;
   }
   seen.push((tx, ty, texpos, rva));

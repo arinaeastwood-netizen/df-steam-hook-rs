@@ -191,6 +191,12 @@ pub unsafe fn attach() {
   }
 }
 
+/// Адрес из функции, которая рисует окно дварфа.
+pub fn in_window_code(rva: usize) -> bool {
+  let (b, e) = (FUNC_BEGIN.load(Ordering::Relaxed), FUNC_END.load(Ordering::Relaxed));
+  b != 0 && rva >= b && rva < e
+}
+
 /// Вылет текста за край окна или за линию колонок (tiles.rs): from — откуда
 /// в коде игры нарисована граница, overflow — на сколько клеток не хватило.
 pub fn overflow(from_rva: usize, overflow: usize) {
