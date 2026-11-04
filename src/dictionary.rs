@@ -172,6 +172,31 @@ pub fn from_community(key: &[u8]) -> bool {
 /// В режиме оригинального текста словарь сообщества пропускается — игра
 /// собирает строки по-английски, и до экрана доходит настоящий текст.
 pub fn lookup(key: &[u8]) -> Option<Vec<u8>> {
+  let value = lookup_inner(key);
+  glyph_probe(key, value.as_deref());
+  value
+}
+
+/// Диагностика «└07» (байт 0xC0) в пустом поле поиска: подстановка при
+/// сборке строки, которой нет на экране как надписи. Первые 20 случаев.
+fn glyph_probe(key: &[u8], value: Option<&[u8]>) {
+  static LOGGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+  let Some(value) = value else { return };
+  if !value.contains(&0xC0) || key.contains(&0xC0) {
+    return;
+  }
+  if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 20 {
+    return;
+  }
+  log::info!(
+    "glyph: built key={:02x?} \"{}\" -> value={:02x?}",
+    &key[..key.len().min(40)],
+    String::from_utf8_lossy(&key[..key.len().min(40)]),
+    &value[..value.len().min(40)]
+  );
+}
+
+fn lookup_inner(key: &[u8]) -> Option<Vec<u8>> {
   if let Some(value) = community(key, true) {
     return Some(value);
   }
